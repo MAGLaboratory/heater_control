@@ -1,0 +1,23 @@
+{
+	"name": "heater",
+	"comment": "This is the configuration file for the heater control system",
+	"secret": "None yet",
+	"temp": {
+		"set_point": 20.0,
+		"filter_ratio": "0.2",
+		"hysteresis": "1"
+	},
+	"mqtt": {
+		"data_sources": ["daisy/checkup"],
+		"temp_source": "ShopB Temp",
+		"broker": "hal.maglab",
+		"port": 1883,
+		"timeout": 15 
+	},
+	"modbus": {
+		"ena": true,
+		"port": "/dev/ttyUSB0",
+		"sid": 2,
+		"timeout": 0.15
+	}
+}
