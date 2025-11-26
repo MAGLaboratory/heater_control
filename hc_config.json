@@ -3,9 +3,9 @@
 	"comment": "This is the configuration file for the heater control system",
 	"secret": "None yet",
 	"temp": {
-		"set_point": 20.0,
-		"filter_ratio": "0.2",
-		"hysteresis": "1"
+		"set_point": 20.5,
+		"filter_ratio": 0.2,
+		"hysteresis": 1.0
 	},
 	"mqtt": {
 		"data_sources": ["daisy/checkup"],
@@ -18,6 +18,7 @@
 		"ena": true,
 		"port": "/dev/ttyUSB0",
 		"sid": 2,
-		"timeout": 0.15
+		"timeout": 0.020,
+		"baud": 38400
 	}
 }
