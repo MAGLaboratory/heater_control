@@ -45,6 +45,21 @@ class HC(mqtt.Client):
 
     exit = Event()
 
+    CHAR_LUT = [
+        0x3f, 0x06, 0x5b, 0x4f,
+        0x66, 0x6d, 0x7d, 0x07,
+        0x7f, 0x6f, 0x77, 0x7c,
+        0x39, 0x5e, 0x79, 0x71
+    ]
+
+    KP_ACT = 0x40
+    KP_UP  = 0x1C
+    KP_LFT = 0x36
+    KP_ENT = 0x24
+    KP_RHT = 0X16
+    KP_DWN = 0x26
+    KP_BAK = 0x1E
+
     class Temp_IIR:
         first_sample_done = False
         y = 0.0
@@ -57,6 +72,24 @@ class HC(mqtt.Client):
             self.y = self.a*x + (1.0-self.a)*self.y if self.first_sample_done else x
             self.first_sample_done = True
             return self.y
+
+    def process_temp(self):
+        half_hysteresis = self.config.temp.hysteresis / 2.0
+        """Determine heater on/off command"""
+        self.low_point = self.config.temp.set_point - half_hysteresis
+        self.high_point = self.config.temp.set_point + half_hysteresis 
+        if self.fil.y > self.high_point:
+            self.heater_on = 0
+        elif self.meas_temp < self.low_point:
+            self.heater_on = 1
+        """Build our response message"""
+        temp_dict = {"HeaterControl Fil Temp" : int(round(self.fil.y * 1000.0)),
+                     "HeaterControl Set High" : int(round(self.high_point * 1000.0)),
+                     "HeaterControl Set Low" : int(round(self.low_point * 1000.0)),
+                     "HeaterControl On" : self.heater_on,
+                     "time": time.time()}
+        logging.info(f"Publishing: {str(temp_dict)}")
+        self.publish(f"{self.config.name}/event", json.dumps(temp_dict))
 
     def signal_handler(self, signum, _):
         """signal handling helper function"""
@@ -91,25 +124,10 @@ class HC(mqtt.Client):
                 logging.info(f"Received Message: {decoded}")
                 data = json.loads(decoded)
                 if self.config.mqtt.temp_source in data:
-                    half_hysteresis = self.config.temp.hysteresis / 2.0
                     logging.info(f"Received temperature: {data[self.config.mqtt.temp_source]}")
-                    self.low_point = self.config.temp.set_point - half_hysteresis
-                    self.high_point = self.config.temp.set_point + half_hysteresis 
-                    meas_temp = int(data[self.config.mqtt.temp_source]) / 1000.0
-                    self.fil.filt(meas_temp)
-                    """Determine heater on/off command"""
-                    if self.fil.y > self.high_point:
-                        self.heater_on = 0
-                    elif meas_temp < self.low_point:
-                        self.heater_on = 1
-                    """Build our response message"""
-                    temp_dict = {"HeaterControl Fil Temp" : int(round(self.fil.y * 1000.0)),
-                                 "HeaterControl Set High" : int(round(self.high_point * 1000.0)),
-                                 "HeaterControl Set Low" : int(round(self.low_point * 1000.0)),
-                                 "HeaterControl On" : self.heater_on,
-                                 "time": time.time()}
-                    logging.info(f"Publishing: {str(temp_dict)}")
-                    self.publish(f"{self.config.name}/event", json.dumps(temp_dict))
+                    self.meas_temp = int(data[self.config.mqtt.temp_source]) / 1000.0
+                    self.fil.filt(self.meas_temp)
+                    self.process_temp()
                 else: 
                     logging.warning(f"Message received without {self.config.mqtt.temp_source}")
             except Exception as err:
@@ -134,11 +152,24 @@ class HC(mqtt.Client):
 
         return retval
 
+    def str27seg(self, s):
+        rv = [0, 0]
+        s = s[::-1]
+        i = 4
+        while i != 0:
+            i -= 1
+            try:
+                rv[i // 2] |= self.CHAR_LUT[int(s[3 - i])] << (0 if i % 2 else 8)
+            except Exception:
+                break
+        return rv
+
     def main(self):
         """this is the main function and most of the work in this script"""
         nextWait = 0.250;
         start = time.monotonic()
         last_cycle_overrun = False
+        self.main_cycle = 0
 
         signal.signal(signal.SIGINT, self.signal_handler)
         signal.signal(signal.SIGTERM, self.signal_handler)
@@ -149,10 +180,13 @@ class HC(mqtt.Client):
         self.instr.serial.clear_buffers_before_each_transaction = False
 
         self.fil = HC.Temp_IIR(self.config.temp.filter_ratio)
+        self.meas_temp = self.config.temp.set_point
         self.heater_on = 0
 
         button = 0
         last_button = 0
+        disp = []
+        last_disp = []
 
         self.connect(host=self.config.mqtt.broker, port=self.config.mqtt.port,
                      keepalive=self.config.mqtt.timeout)
@@ -160,15 +194,34 @@ class HC(mqtt.Client):
 
         start = time.monotonic()
         while not self.exit.wait(nextWait):
-
+            if (self.main_cycle >= 65535):
+                self.main_cycle = 0
+            else:
+                self.main_cycle += 1
             """get button press here"""
             last_button = button
             button = self.handle_modbus(self.instr.read_register, 0, functioncode = 4)
-            if (last_button != button) and (button & 0x40):
-                logging.info(f"Button Press Recorded: {button & (0x40 - 1)}")
+            if (last_button != button) and (button & self.KP_ACT):
+                button_code = button & (self.KP_ACT - 1)
+                logging.debug(f"Button Press Recorded: {button_code}")
+                if button_code == self.KP_UP:
+                    self.config.temp.set_point += 0.1
+                    logging.info(f"Temp inc to {self.config.temp.set_point}")
+                    self.process_temp()
+                elif button == self.KP_DOWN:
+                    self.config.temp.set_point -= 0.1
+                    logging.info(f"Temp dec to {self.config.temp.set_point}")
+                    self.process_temp()
+                
             """process on off here"""
             self.handle_modbus(self.instr.write_bit, 0, self.heater_on)
             """output display here"""
+            sp_str = str(round(self.config.temp.set_point * 10.0))
+            last_disp = disp
+            disp = self.str27seg(sp_str)
+            disp[1] |= 0x8000
+            even_odd = self.main_cycle % 2
+            self.handle_modbus(self.instr.write_register, even_odd, disp[even_odd])
 
             """ Main Loop Execution Rate Handling """
             curTime = time.monotonic()
@@ -176,7 +229,7 @@ class HC(mqtt.Client):
             nextWait -= curTime - start
             if nextWait < 0.0:
                 if last_cycle_overrun == 0:
-                    logging.info("Main loop overrun")
+                    logging.debug("Main loop overrun")
                 elif last_cycle_overrun >= 20:
                     last_cycle_overrun = 0
                 start = curTime + nextWait
