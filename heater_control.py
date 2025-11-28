@@ -208,7 +208,7 @@ class HC(mqtt.Client):
                     self.config.temp.set_point += 0.1
                     logging.info(f"Temp inc to {self.config.temp.set_point}")
                     self.process_temp()
-                elif button == self.KP_DOWN:
+                elif button_code == self.KP_DWN:
                     self.config.temp.set_point -= 0.1
                     logging.info(f"Temp dec to {self.config.temp.set_point}")
                     self.process_temp()
