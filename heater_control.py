@@ -9,10 +9,20 @@ from typing import *
 
 @dataclass_json
 @dataclass
+class Temp_Item:
+    name7seg: Tuple[int, int]
+    val: int
+    decimal: int
+    hi_lim: int
+    lo_lim: int
+    change_by: int = 1
+
+@dataclass_json
+@dataclass
 class Temp:
-    set_point: float
-    filter_ratio: float
-    hysteresis: float
+    set_point: Temp_Item
+    filter_ratio: Temp_Item
+    hysteresis: Temp_Item
 
 @dataclass_json
 @dataclass
@@ -52,6 +62,8 @@ class HC(mqtt.Client):
         0x39, 0x5e, 0x79, 0x71
     ]
 
+    DIGITS = 4
+
     KP_ACT = 0x40
     KP_UP  = 0x1C
     KP_LFT = 0x36
@@ -64,8 +76,9 @@ class HC(mqtt.Client):
         first_sample_done = False
         y = 0.0
         a = 0.0
-        def __init__(self, alpha):
+        def __init__(self, initial, alpha):
             self.first_sample_done = False
+            self.y = initial
             self.a = alpha
 
         def filt(self, x):
@@ -74,18 +87,18 @@ class HC(mqtt.Client):
             return self.y
 
     def process_temp(self):
-        half_hysteresis = self.config.temp.hysteresis / 2.0
+        half_hysteresis = self.config.temp.hysteresis.val // 2
         """Determine heater on/off command"""
-        self.low_point = self.config.temp.set_point - half_hysteresis
-        self.high_point = self.config.temp.set_point + half_hysteresis 
-        if self.fil.y > self.high_point:
+        self.low_point = self.config.temp.set_point.val - half_hysteresis
+        self.high_point = self.config.temp.set_point.val + half_hysteresis 
+        if self.fil.y > (self.high_point / 10.0):
             self.heater_on = 0
-        elif self.meas_temp < self.low_point:
+        elif (self.meas_temp // 100) < self.low_point:
             self.heater_on = 1
         """Build our response message"""
         temp_dict = {"HeaterControl Fil Temp" : int(round(self.fil.y * 1000.0)),
-                     "HeaterControl Set High" : int(round(self.high_point * 1000.0)),
-                     "HeaterControl Set Low" : int(round(self.low_point * 1000.0)),
+                     "HeaterControl Set High" : self.high_point * 100,
+                     "HeaterControl Set Low" : self.low_point * 100,
                      "HeaterControl On" : self.heater_on,
                      "time": time.time()}
         logging.info(f"Publishing: {str(temp_dict)}")
@@ -125,8 +138,8 @@ class HC(mqtt.Client):
                 data = json.loads(decoded)
                 if self.config.mqtt.temp_source in data:
                     logging.info(f"Received temperature: {data[self.config.mqtt.temp_source]}")
-                    self.meas_temp = int(data[self.config.mqtt.temp_source]) / 1000.0
-                    self.fil.filt(self.meas_temp)
+                    self.meas_temp = int(data[self.config.mqtt.temp_source]) 
+                    self.fil.filt(self.meas_temp / 1000.0)
                     self.process_temp()
                 else: 
                     logging.warning(f"Message received without {self.config.mqtt.temp_source}")
@@ -152,16 +165,31 @@ class HC(mqtt.Client):
 
         return retval
 
-    def str27seg(self, s):
+    def str27seg(self, s, dig):
         rv = [0, 0]
         s = s[::-1]
-        i = 4
+        i = self.DIGITS
         while i != 0:
             i -= 1
+            """ Calculate inverse index """
+            inv = self.DIGITS-1 - i
+            num = 0
             try:
-                rv[i // 2] |= self.CHAR_LUT[int(s[3 - i])] << (0 if i % 2 else 8)
-            except Exception:
-                break
+                """ Use the inverse index to look up the digit at that pos """
+                num = int(s[inv])
+            except IndexError:
+                """ Print digit anyway because it is after or at the
+                decimal point """
+                if inv <= dig:
+                    pass
+                else:
+                    break
+            """ Compute the 7 segment vector for the display...
+            There are two digits contained in each rv.
+            The digit is looked up using the LUT and decimaled if appropriate
+            then it is shifted into place. """
+            rv[i // 2] |= ((self.CHAR_LUT[num] | (0x80 if inv == dig else 0))
+                           << (0 if i % 2 else 8))
         return rv
 
     def main(self):
@@ -179,8 +207,8 @@ class HC(mqtt.Client):
         self.instr.serial.timeout = self.config.modbus.timeout
         self.instr.serial.clear_buffers_before_each_transaction = False
 
-        self.fil = HC.Temp_IIR(self.config.temp.filter_ratio)
-        self.meas_temp = self.config.temp.set_point
+        self.fil = HC.Temp_IIR(self.config.temp.set_point.val / 10.0, self.config.temp.filter_ratio.val / 1000.0)
+        self.meas_temp = self.config.temp.set_point.val * 100
         self.heater_on = 0
 
         button = 0
@@ -201,25 +229,25 @@ class HC(mqtt.Client):
             """get button press here"""
             last_button = button
             button = self.handle_modbus(self.instr.read_register, 0, functioncode = 4)
+            """ TODO: break out into number editor """
             if (last_button != button) and (button & self.KP_ACT):
                 button_code = button & (self.KP_ACT - 1)
                 logging.debug(f"Button Press Recorded: {button_code}")
                 if button_code == self.KP_UP:
-                    self.config.temp.set_point += 0.1
-                    logging.info(f"Temp inc to {self.config.temp.set_point}")
+                    self.config.temp.set_point.val += 1
+                    logging.info(f"Temp inc to {self.config.temp.set_point.val / 10.0}")
                     self.process_temp()
                 elif button_code == self.KP_DWN:
-                    self.config.temp.set_point -= 0.1
-                    logging.info(f"Temp dec to {self.config.temp.set_point}")
+                    self.config.temp.set_point.val -= 1
+                    logging.info(f"Temp dec to {self.config.temp.set_point.val/ 10.0}")
                     self.process_temp()
                 
             """process on off here"""
             self.handle_modbus(self.instr.write_bit, 0, self.heater_on)
             """output display here"""
-            sp_str = str(round(self.config.temp.set_point * 10.0))
+            sp_str = str(self.config.temp.set_point.val)
             last_disp = disp
-            disp = self.str27seg(sp_str)
-            disp[1] |= 0x8000
+            disp = self.str27seg(sp_str, 1)
             even_odd = self.main_cycle % 2
             self.handle_modbus(self.instr.write_register, even_odd, disp[even_odd])
 
