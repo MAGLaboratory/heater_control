@@ -253,7 +253,7 @@ class HC(mqtt.Client):
 
             """ Main Loop Execution Rate Handling """
             curTime = time.monotonic()
-            nextWait = 0.250
+            nextWait = 0.100
             nextWait -= curTime - start
             if nextWait < 0.0:
                 if last_cycle_overrun == 0:
@@ -277,7 +277,7 @@ if __name__ == "__main__":
     logging.info("Reading Config File")
     with open(f"{my_path}{os.sep}hc_config.json", "r") as configFile:
         heaterControl.config = HC.Config.from_json(configFile.read())
-        logging.info(f"{heaterControl.config}")
-    logging.info("Starting main function")
+        logging.debug(f"{heaterControl.config}")
+    logging.info("Starting")
     heaterControl.main()
 
