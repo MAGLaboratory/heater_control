@@ -63,6 +63,11 @@ class HC(mqtt.Client):
     ]
 
     DIGITS = 4
+    DS_TEMP = (0x7876, 0x0000)
+    DS_OCC =  (0x3f58, 0x5800)
+    DS_SAVE = (0x6d77, 0x1c79)
+    DS_YES =  (0x7a79, 0x6d00)
+    DS_NO =   (0x543f, 0x0000)
 
     KP_ACT = 0x40
     KP_UP  = 0x1C
@@ -165,11 +170,14 @@ class HC(mqtt.Client):
 
         return retval
 
+
     def str27seg(self, s, dig):
         rv = [0, 0]
         s = s[::-1]
         i = self.DIGITS
         while i != 0:
+            """ The rest of this code expects the index to be one less than how
+            it began.  This index is used to calculate the return vector """
             i -= 1
             """ Calculate inverse index """
             inv = self.DIGITS-1 - i
@@ -191,6 +199,51 @@ class HC(mqtt.Client):
             rv[i // 2] |= ((self.CHAR_LUT[num] | (0x80 if inv == dig else 0))
                            << (0 if i % 2 else 8))
         return rv
+ 
+    def param_scroll(self, auto = True, i_param, i_val):
+        rv = [0, 0]
+        val = True
+        param = 1
+        if auto:
+            param = autoself.main_loop >> 3
+            val = bool(param & 0x1)
+            param >>= 1
+            param %= 6
+        else:
+            param = i_param
+            val = i_val
+        p_n = [0, 0]
+        p_v = [0, 0]
+        if param < 1:
+            """ temperature """
+            p_n = list(DS_TEMP)
+            p_v = (str(self.meas_temp // 10), 2)
+        elif param < 5:
+            configItem = self.config.temp[param - 1]
+            p_n = list(configitem.name7seg)
+            p_v = [str(configItem.val), configItem.decimal]
+        else:
+            postParam = param - 5
+            match postParam:
+                case 0:
+                    """ occupancy """ 
+                    p_n = list(DS_OCC)
+                    """ occupancy not implement yet """
+                    p_v = list(DS_YES)
+                case 1;
+                    """ save """
+                    p_v = list(DS_SAVE)
+
+        """ Display either the parameter name or the value """
+        if val == False:
+            rv = p_n
+        else:
+            if (param < 5):
+                rv = self.str27seg(*p_v)
+            else: 
+                rv = p_v
+
+        return rv;
 
     def main(self):
         """this is the main function and most of the work in this script"""
@@ -247,7 +300,7 @@ class HC(mqtt.Client):
             """output display here"""
             sp_str = str(self.config.temp.set_point.val)
             last_disp = disp
-            disp = self.str27seg(sp_str, 1)
+            disp = param_scroll()
             even_odd = self.main_cycle % 2
             self.handle_modbus(self.instr.write_register, even_odd, disp[even_odd])
 
