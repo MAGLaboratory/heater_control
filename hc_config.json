@@ -4,14 +4,14 @@
 	"secret": "None yet",
 	"temp": {
 		"set_point": {
-			"name7seg": [0x6d79,0x7800],
+			"name7seg": [28025, 30720],
 			"val": 205,
 			"decimal": 1,
 			"hi_lim": 300,
 			"lo_lim": 100
 		},
 		"filter_ratio": {
-		       	"name7seg": [0x7130,0x7800],
+		       	"name7seg": [28976, 30720],
 			"val": 200,
 			"decimal": 3,
 			"hi_lim": 2000,
@@ -19,7 +19,7 @@
 			"change_by": 2
 		},
 		"hysteresis": {
-			"name7seg": [0x766e,0x6d00],
+			"name7seg": [30318, 27904],
 			"val": 10,
 			"decimal": 1,
 			"hi_lim": 50,

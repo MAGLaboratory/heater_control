@@ -200,45 +200,57 @@ class HC(mqtt.Client):
                            << (0 if i % 2 else 8))
         return rv
  
-    def param_scroll(self, auto = True, i_param, i_val):
+    def param_scroll(self, auto = True, i_param = 1, i_val = True):
         rv = [0, 0]
         val = True
         param = 1
+        p_n = [0, 0]
+        p_v = [0, 0]
+        DIG_PARAM = 4
         if auto:
-            param = autoself.main_loop >> 3
+            param = self.main_cycle >> 4
             val = bool(param & 0x1)
             param >>= 1
-            param %= 6
+            param %= 5 # the save is not a regularly displayed parameter
         else:
             param = i_param
             val = i_val
-        p_n = [0, 0]
-        p_v = [0, 0]
         if param < 1:
             """ temperature """
-            p_n = list(DS_TEMP)
+            p_n = list(self.DS_TEMP)
             p_v = (str(self.meas_temp // 10), 2)
-        elif param < 5:
-            configItem = self.config.temp[param - 1]
-            p_n = list(configitem.name7seg)
+        elif param < DIG_PARAM:
+            postParam = param - 1
+            configItem = None
+            match postParam:
+                case 0:
+                    """ set point """
+                    configItem = self.config.temp.set_point
+                case 1:
+                    """ filter ratio """
+                    configItem = self.config.temp.filter_ratio
+                case 2:
+                    """ hysteresis """
+                    configItem = self.config.temp.hysteresis
+            p_n = list(configItem.name7seg)
             p_v = [str(configItem.val), configItem.decimal]
         else:
-            postParam = param - 5
+            postParam = param - DIG_PARAM
             match postParam:
                 case 0:
                     """ occupancy """ 
-                    p_n = list(DS_OCC)
+                    p_n = list(self.DS_OCC)
                     """ occupancy not implement yet """
-                    p_v = list(DS_YES)
-                case 1;
+                    p_v = list(self.DS_YES)
+                case 1:
                     """ save """
-                    p_v = list(DS_SAVE)
+                    p_n = list(self.DS_SAVE)
 
         """ Display either the parameter name or the value """
         if val == False:
             rv = p_n
         else:
-            if (param < 5):
+            if (param < DIG_PARAM):
                 rv = self.str27seg(*p_v)
             else: 
                 rv = p_v
@@ -298,9 +310,8 @@ class HC(mqtt.Client):
             """process on off here"""
             self.handle_modbus(self.instr.write_bit, 0, self.heater_on)
             """output display here"""
-            sp_str = str(self.config.temp.set_point.val)
             last_disp = disp
-            disp = param_scroll()
+            disp = self.param_scroll()
             even_odd = self.main_cycle % 2
             self.handle_modbus(self.instr.write_register, even_odd, disp[even_odd])
 
