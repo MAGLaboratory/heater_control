@@ -63,7 +63,7 @@ class HC(mqtt.Client):
     ]
 
     DIGITS = 4
-    DS_TEMP = (0x7876, 0x0000)
+    DS_TEMP = (0x7873, 0x0000)
     DS_OCC =  (0x3f58, 0x5800)
     DS_SAVE = (0x6d77, 0x1c79)
     DS_YES =  (0x7a79, 0x6d00)

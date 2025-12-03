@@ -11,7 +11,7 @@
 			"lo_lim": 100
 		},
 		"filter_ratio": {
-		       	"name7seg": [28976, 30720],
+		       	"name7seg": [28950, 30720],
 			"val": 200,
 			"decimal": 3,
 			"hi_lim": 2000,
