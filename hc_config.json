@@ -24,6 +24,13 @@
 			"decimal": 1,
 			"hi_lim": 50,
 			"lo_lim": 1
+		},
+		"start_time": {
+			"name7seg": [30740, 21625],
+			"val": 60,
+			"decimal": 0,
+			"hi_lim": 109,
+			"lo_lim": 30
 		}
 	},
 	"mqtt": {
