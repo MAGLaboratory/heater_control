@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from dataclasses_json import dataclass_json
 from threading import Event
 from typing import *
+from ctypes import c_uint16
 
 @dataclass_json
 @dataclass
@@ -49,7 +50,14 @@ class HC(mqtt.Client):
         name: str
         comment: str
         secret: str
-        temp: Temp
+        temp: Dict[str, Temp_Item]
+        """
+            must contain: 
+            - set_point
+            - filter_ratio
+            - hysteresis
+            - start_time
+        """
         mqtt: MQTT
         modbus: Modbus
 
@@ -66,7 +74,7 @@ class HC(mqtt.Client):
     DS_TEMP = (0x7873, 0x0000)
     DS_OCC =  (0x3f58, 0x5800)
     DS_SAVE = (0x6d77, 0x1c79)
-    DS_YES =  (0x7a79, 0x6d00)
+    DS_YES =  (0x6e79, 0x6d00)
     DS_NO =   (0x543f, 0x0000)
 
     KP_ACT = 0x40
@@ -92,10 +100,10 @@ class HC(mqtt.Client):
             return self.y
 
     def process_temp(self):
-        half_hysteresis = self.config.temp.hysteresis.val // 2
+        half_hysteresis = self.config.temp["hysteresis"].val // 2
         """Determine heater on/off command"""
-        self.low_point = self.config.temp.set_point.val - half_hysteresis
-        self.high_point = self.config.temp.set_point.val + half_hysteresis 
+        self.low_point = self.config.temp["set_point"].val - half_hysteresis
+        self.high_point = self.config.temp["set_point"].val + half_hysteresis 
         if self.fil.y > (self.high_point / 10.0):
             self.heater_on = 0
         elif (self.meas_temp // 100) < self.low_point:
@@ -199,19 +207,36 @@ class HC(mqtt.Client):
             rv[i // 2] |= ((self.CHAR_LUT[num] | (0x80 if inv == dig else 0))
                            << (0 if i % 2 else 8))
         return rv
- 
+
+    def param_sel(self, c_param, c_val, keycode):
+        return c_param, c_val
+
+    """
+        The parameter display function takes a parameter index and a boolean.
+        The boolean value `i_val` when `false` displays the parameter name and
+        when `true` displays the value.
+
+        The parameters are as follows:
+        0 - temperature
+        1 - set point
+        2 - filter ratio 
+        3 - hysteresis
+        4 - start time
+        5 - occupancy
+        6 - save
+    """
     def param_scroll(self, auto = True, i_param = 1, i_val = True):
         rv = [0, 0]
         val = True
         param = 1
         p_n = [0, 0]
         p_v = [0, 0]
-        DIG_PARAM = 4
+        DIG_PARAM = len(self.config.temp.keys()) + 1
         if auto:
-            param = self.main_cycle >> 4
+            param = self.main_cycle.value >> 4
             val = bool(param & 0x1)
             param >>= 1
-            param %= 5 # the save is not a regularly displayed parameter
+            param %= DIG_PARAM + 1 # the save is not a regularly displayed parameter
         else:
             param = i_param
             val = i_val
@@ -221,21 +246,16 @@ class HC(mqtt.Client):
             p_v = (str(self.meas_temp // 10), 2)
         elif param < DIG_PARAM:
             postParam = param - 1
-            configItem = None
-            match postParam:
-                case 0:
-                    """ set point """
-                    configItem = self.config.temp.set_point
-                case 1:
-                    """ filter ratio """
-                    configItem = self.config.temp.filter_ratio
-                case 2:
-                    """ hysteresis """
-                    configItem = self.config.temp.hysteresis
+            configKey = list(self.config.temp.keys())[postParam]
+            configItem = self.config.temp[configKey]
+            """ set point """
+            """ filter ratio """
+            """ hysteresis """
+            """ start time """
             p_n = list(configItem.name7seg)
             p_v = [str(configItem.val), configItem.decimal]
         else:
-            postParam = param - DIG_PARAM
+            postParam = param - DIG_PARAM # + 1 - 1
             match postParam:
                 case 0:
                     """ occupancy """ 
@@ -261,8 +281,8 @@ class HC(mqtt.Client):
         """this is the main function and most of the work in this script"""
         nextWait = 0.250;
         start = time.monotonic()
-        last_cycle_overrun = False
-        self.main_cycle = 0
+        last_cycle_overrun = 0
+        self.main_cycle = c_uint16(0)
 
         signal.signal(signal.SIGINT, self.signal_handler)
         signal.signal(signal.SIGTERM, self.signal_handler)
@@ -272,14 +292,16 @@ class HC(mqtt.Client):
         self.instr.serial.timeout = self.config.modbus.timeout
         self.instr.serial.clear_buffers_before_each_transaction = False
 
-        self.fil = HC.Temp_IIR(self.config.temp.set_point.val / 10.0, self.config.temp.filter_ratio.val / 1000.0)
-        self.meas_temp = self.config.temp.set_point.val * 100
+        self.fil = HC.Temp_IIR(self.config.temp["set_point"].val / 10.0, self.config.temp["filter_ratio"].val / 1000.0)
+        self.meas_temp = self.config.temp["set_point"].val * 100
         self.heater_on = 0
 
         button = 0
         last_button = 0
         disp = []
         last_disp = []
+        param = 0
+        val = True
 
         self.connect(host=self.config.mqtt.broker, port=self.config.mqtt.port,
                      keepalive=self.config.mqtt.timeout)
@@ -287,24 +309,25 @@ class HC(mqtt.Client):
 
         start = time.monotonic()
         while not self.exit.wait(nextWait):
-            if (self.main_cycle >= 65535):
-                self.main_cycle = 0
+            if (self.main_cycle.value >= 65535):
+                self.main_cycle.value = 0
             else:
-                self.main_cycle += 1
+                self.main_cycle.value += 1
             """get button press here"""
             last_button = button
             button = self.handle_modbus(self.instr.read_register, 0, functioncode = 4)
             """ TODO: break out into number editor """
+            param, val = self.param_sel(param, val, button)
             if (last_button != button) and (button & self.KP_ACT):
                 button_code = button & (self.KP_ACT - 1)
                 logging.debug(f"Button Press Recorded: {button_code}")
                 if button_code == self.KP_UP:
-                    self.config.temp.set_point.val += 1
-                    logging.info(f"Temp inc to {self.config.temp.set_point.val / 10.0}")
+                    self.config.temp["set_point"].val += 1
+                    logging.info(f"Temp inc to {self.config.temp['set_point'].val / 10.0}")
                     self.process_temp()
                 elif button_code == self.KP_DWN:
-                    self.config.temp.set_point.val -= 1
-                    logging.info(f"Temp dec to {self.config.temp.set_point.val/ 10.0}")
+                    self.config.temp["set_point"].val -= 1
+                    logging.info(f"Temp dec to {self.config.temp['set_point'].val/ 10.0}")
                     self.process_temp()
                 
             """process on off here"""
@@ -312,7 +335,7 @@ class HC(mqtt.Client):
             """output display here"""
             last_disp = disp
             disp = self.param_scroll()
-            even_odd = self.main_cycle % 2
+            even_odd = self.main_cycle.value % 2
             self.handle_modbus(self.instr.write_register, even_odd, disp[even_odd])
 
             """ Main Loop Execution Rate Handling """
@@ -320,6 +343,7 @@ class HC(mqtt.Client):
             nextWait = 0.100
             nextWait -= curTime - start
             if nextWait < 0.0:
+                """ Main loop overrun is only reported once """
                 if last_cycle_overrun == 0:
                     logging.debug("Main loop overrun")
                 elif last_cycle_overrun >= 20:
@@ -334,6 +358,10 @@ class HC(mqtt.Client):
         self.disconnect()
         self.loop_stop()
 
+""" 
+    The default function in this script reads the configuration file found at
+    where the source script exists.
+"""
 if __name__ == "__main__":
     heaterControl = HC(mqtt.CallbackAPIVersion.VERSION2, "heater_control")
     my_path = os.path.dirname(os.path.abspath(__file__))
