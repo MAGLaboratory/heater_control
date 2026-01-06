@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 import minimalmodbus
-import time, json, signal, os, logging, traceback, sys
+import time, json, signal, os, logging, traceback, sys, copy
 import paho.mqtt.client as mqtt
 from dataclasses import dataclass
 from dataclasses_json import dataclass_json
@@ -100,10 +100,15 @@ class HC(mqtt.Client):
             return self.y
 
     def process_temp(self):
-        half_hysteresis = self.config.temp["hysteresis"].val // 2
+        hysteresis = self.config.temp["hysteresis"].val
         """Determine heater on/off command"""
-        self.low_point = self.config.temp["set_point"].val - half_hysteresis
-        self.high_point = self.config.temp["set_point"].val + half_hysteresis 
+        if (self.start_cycle == True):
+            self.low_point = self.config.temp["set_point"].val - hysteresis // 2
+        else:
+            self.low_point = self.config.temp["set_point"].val - hysteresis
+        self.high_point = self.config.temp["set_point"].val 
+        """ The filtered value is expressed as whole degrees """
+        """ The measured temperature is expressed as thousandths of a degree"""
         if self.fil.y > (self.high_point / 10.0):
             self.heater_on = 0
         elif (self.meas_temp // 100) < self.low_point:
@@ -209,6 +214,23 @@ class HC(mqtt.Client):
         return rv
 
     def param_sel(self, c_param, c_val, keycode):
+        """ make sure the keycode is current """
+        if (self.last_button != keycode) and (keycode & self.KP_ACT):
+            """ hacky way to use the KP_ACT as an 'and' mask """
+            button_code = keycode & (self.KP_ACT - 1)
+            logging.debug(f"Button Press Recorded: {button_code}")
+            if button_code == self.KP_UP:
+                self.config.temp["set_point"].val += 1
+                logging.info(f"Temp inc to {self.config.temp['set_point'].val / 10.0}")
+                self.start_cycle = True
+                self.process_temp()
+            elif button_code == self.KP_DWN:
+                self.config.temp["set_point"].val -= 1
+                logging.info(f"Temp dec to {self.config.temp['set_point'].val/ 10.0}")
+                self.start_cycle = True
+                self.process_temp()
+
+        self.last_button = keycode
         return c_param, c_val
 
     """
@@ -283,6 +305,7 @@ class HC(mqtt.Client):
         start = time.monotonic()
         last_cycle_overrun = 0
         self.main_cycle = c_uint16(0)
+        last_cycle = self.main_cycle
 
         signal.signal(signal.SIGINT, self.signal_handler)
         signal.signal(signal.SIGTERM, self.signal_handler)
@@ -294,10 +317,12 @@ class HC(mqtt.Client):
 
         self.fil = HC.Temp_IIR(self.config.temp["set_point"].val / 10.0, self.config.temp["filter_ratio"].val / 1000.0)
         self.meas_temp = self.config.temp["set_point"].val * 100
+        self.start_cycle = True
+        self.start_cycle_timer = copy.copy(self.main_cycle)
         self.heater_on = 0
 
         button = 0
-        last_button = 0
+        self.last_button = 0
         disp = []
         last_disp = []
         param = 0
@@ -309,29 +334,23 @@ class HC(mqtt.Client):
 
         start = time.monotonic()
         while not self.exit.wait(nextWait):
-            if (self.main_cycle.value >= 65535):
-                self.main_cycle.value = 0
-            else:
-                self.main_cycle.value += 1
+            self.main_cycle.value += 1
             """get button press here"""
-            last_button = button
             button = self.handle_modbus(self.instr.read_register, 0, functioncode = 4)
             """ TODO: break out into number editor """
             param, val = self.param_sel(param, val, button)
-            if (last_button != button) and (button & self.KP_ACT):
-                button_code = button & (self.KP_ACT - 1)
-                logging.debug(f"Button Press Recorded: {button_code}")
-                if button_code == self.KP_UP:
-                    self.config.temp["set_point"].val += 1
-                    logging.info(f"Temp inc to {self.config.temp['set_point'].val / 10.0}")
-                    self.process_temp()
-                elif button_code == self.KP_DWN:
-                    self.config.temp["set_point"].val -= 1
-                    logging.info(f"Temp dec to {self.config.temp['set_point'].val/ 10.0}")
-                    self.process_temp()
                 
-            """process on off here"""
+            """process on off and start timer here"""
             self.handle_modbus(self.instr.write_bit, 0, self.heater_on)
+            if (self.heater_on == True):
+                self.start_cycle = False
+                self.start_cycle_timer = copy.copy(self.main_cycle)
+            else:
+                st_val = self.config.temp["start_time"].val * 600
+                if (self.main_cycle.value - self.start_cycle_timer.value) > st_val:
+                    logging.debug("Control start cycle activated")
+                    self.start_cycle = True
+                    self.start_cycle_timer.value = self.main_cycle.value - st_val - 1
             """output display here"""
             last_disp = disp
             disp = self.param_scroll()

@@ -5,7 +5,7 @@
 	"temp": {
 		"set_point": {
 			"name7seg": [28025, 30720],
-			"val": 205,
+			"val": 195,
 			"decimal": 1,
 			"hi_lim": 300,
 			"lo_lim": 100
