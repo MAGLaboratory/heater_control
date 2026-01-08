@@ -347,7 +347,7 @@ class HC(mqtt.Client):
                 self.start_cycle_timer = copy.copy(self.main_cycle)
             else:
                 st_val = self.config.temp["start_time"].val * 600
-                if (self.main_cycle.value - self.start_cycle_timer.value) > st_val:
+                if c_uint16(self.main_cycle.value - self.start_cycle_timer.value).value > st_val:
                     logging.debug("Control start cycle activated")
                     self.start_cycle = True
                     self.start_cycle_timer.value = self.main_cycle.value - st_val - 1
