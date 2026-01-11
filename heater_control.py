@@ -318,6 +318,7 @@ class HC(mqtt.Client):
         self.fil = HC.Temp_IIR(self.config.temp["set_point"].val / 10.0, self.config.temp["filter_ratio"].val / 1000.0)
         self.meas_temp = self.config.temp["set_point"].val * 100
         self.start_cycle = True
+        self.last_start_cycle = True
         self.start_cycle_timer = copy.copy(self.main_cycle)
         self.heater_on = 0
 
@@ -343,14 +344,17 @@ class HC(mqtt.Client):
             """process on off and start timer here"""
             self.handle_modbus(self.instr.write_bit, 0, self.heater_on)
             if (self.heater_on == True):
+                self.last_start_cycle = self.start_cycle
                 self.start_cycle = False
                 self.start_cycle_timer = copy.copy(self.main_cycle)
             else:
                 st_val = self.config.temp["start_time"].val * 600
                 if c_uint16(self.main_cycle.value - self.start_cycle_timer.value).value > st_val:
-                    logging.debug("Control start cycle activated")
+                    if (self.last_start_cycle == False):
+                        logging.debug("Control start cycle activated")
+                    self.last_start_cycle = self.start_cycle
                     self.start_cycle = True
-                    self.start_cycle_timer.value = self.main_cycle.value - st_val - 1
+                    self.start_cycle_timer.value = c_uint16(self.main_cycle.value - st_val - 1).value
             """output display here"""
             last_disp = disp
             disp = self.param_scroll()
