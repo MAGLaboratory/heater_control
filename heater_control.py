@@ -343,7 +343,7 @@ class HC(mqtt.Client):
                 
             """process on off and start timer here"""
             self.handle_modbus(self.instr.write_bit, 0, self.heater_on)
-            if (self.heater_on == True):
+            if (self.heater_on != 0):
                 self.last_start_cycle = self.start_cycle
                 self.start_cycle = False
                 self.start_cycle_timer = copy.copy(self.main_cycle)
