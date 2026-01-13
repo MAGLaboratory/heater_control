@@ -2,6 +2,7 @@
 	"name": "heater",
 	"comment": "This is the configuration file for the heater control system",
 	"secret": "None yet",
+	"report_overrun": false,
 	"temp": {
 		"set_point": {
 			"name7seg": [28025, 30720],

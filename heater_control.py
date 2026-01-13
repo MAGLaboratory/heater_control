@@ -20,13 +20,6 @@ class Temp_Item:
 
 @dataclass_json
 @dataclass
-class Temp:
-    set_point: Temp_Item
-    filter_ratio: Temp_Item
-    hysteresis: Temp_Item
-
-@dataclass_json
-@dataclass
 class MQTT:
     data_sources: List[str]
     temp_source: str
@@ -50,6 +43,7 @@ class HC(mqtt.Client):
         name: str
         comment: str
         secret: str
+        report_overrun: bool
         temp: Dict[str, Temp_Item]
         """
             must contain: 
@@ -117,6 +111,7 @@ class HC(mqtt.Client):
         temp_dict = {"HeaterControl Fil Temp" : int(round(self.fil.y * 1000.0)),
                      "HeaterControl Set High" : self.high_point * 100,
                      "HeaterControl Set Low" : self.low_point * 100,
+                     "HeaterControl Start Cycle" : int(self.start_cycle),
                      "HeaterControl On" : self.heater_on,
                      "time": time.time()}
         logging.info(f"Publishing: {str(temp_dict)}")
@@ -124,7 +119,7 @@ class HC(mqtt.Client):
 
     def signal_handler(self, signum, _):
         """signal handling helper function"""
-        logging.warning(f"Caught a deadly signal: {signum}")
+        logging.critical(f"Caught a deadly signal: {signal.Signals(signum).name}")
         self.exit.set()
 
     def on_log(self, client, userdata, level, buf):
@@ -344,6 +339,8 @@ class HC(mqtt.Client):
             """process on off and start timer here"""
             self.handle_modbus(self.instr.write_bit, 0, self.heater_on)
             if (self.heater_on != 0):
+                if (self.last_start_cycle == True):
+                    logging.debug("Control start cycle deactivated")
                 self.last_start_cycle = self.start_cycle
                 self.start_cycle = False
                 self.start_cycle_timer = copy.copy(self.main_cycle)
@@ -367,9 +364,9 @@ class HC(mqtt.Client):
             nextWait -= curTime - start
             if nextWait < 0.0:
                 """ Main loop overrun is only reported once """
-                if last_cycle_overrun == 0:
+                if last_cycle_overrun == 0 and self.config.report_overrun:
                     logging.debug("Main loop overrun")
-                elif last_cycle_overrun >= 20:
+                if last_cycle_overrun >= 20:
                     last_cycle_overrun = 0
                 start = curTime + nextWait
                 nextWait = 0.0
@@ -388,7 +385,7 @@ class HC(mqtt.Client):
 if __name__ == "__main__":
     heaterControl = HC(mqtt.CallbackAPIVersion.VERSION2, "heater_control")
     my_path = os.path.dirname(os.path.abspath(__file__))
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(level=logging.DEBUG)
     logging.info("Reading Config File")
     with open(f"{my_path}{os.sep}hc_config.json", "r") as configFile:
         heaterControl.config = HC.Config.from_json(configFile.read())
