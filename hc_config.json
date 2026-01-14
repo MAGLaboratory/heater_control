@@ -2,10 +2,11 @@
 	"name": "heater",
 	"comment": "This is the configuration file for the heater control system",
 	"secret": "None yet",
+	"report_overrun": false,
 	"temp": {
 		"set_point": {
 			"name7seg": [28025, 30720],
-			"val": 205,
+			"val": 195,
 			"decimal": 1,
 			"hi_lim": 300,
 			"lo_lim": 100
@@ -24,6 +25,13 @@
 			"decimal": 1,
 			"hi_lim": 50,
 			"lo_lim": 1
+		},
+		"start_time": {
+			"name7seg": [30740, 21625],
+			"val": 60,
+			"decimal": 0,
+			"hi_lim": 109,
+			"lo_lim": 30
 		}
 	},
 	"mqtt": {
