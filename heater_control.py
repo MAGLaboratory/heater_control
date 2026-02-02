@@ -54,6 +54,7 @@ class HC(mqtt.Client):
         """
         mqtt: MQTT
         modbus: Modbus
+        loglevel: Optional[str] = None
 
     exit = Event()
 
@@ -301,6 +302,14 @@ class HC(mqtt.Client):
         last_cycle_overrun = 0
         self.main_cycle = c_uint16(0)
         last_cycle = self.main_cycle
+
+        try:
+            if type(logging.getLevelName(self.config.loglevel.upper())) is int:
+                logging.basicConfig(level=self.config.loglevel.upper())
+            else:
+                logging.warning("Log level not configured.  Defaulting to WARNING.")
+        except (KeyError, AttributeError) as e:
+            logging.warning("Log level not configured.  Defaulting to WARNING.  Caught: " + str(e))
 
         signal.signal(signal.SIGINT, self.signal_handler)
         signal.signal(signal.SIGTERM, self.signal_handler)

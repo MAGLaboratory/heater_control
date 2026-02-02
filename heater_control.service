@@ -1,0 +1,11 @@
+[Unit]
+Description=Heater Controller
+
+[Service]
+User=heater
+Group=heater
+Restart=on-failure
+ExecStart=/home/heater/heater_control/heater_control.py
+
+[Install]
+WantedBy=multi-user.target
