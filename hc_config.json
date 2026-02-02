@@ -47,5 +47,6 @@
 		"sid": 2,
 		"timeout": 0.020,
 		"baud": 38400
-	}
+	},
+	"loglevel": "debug"
 }
