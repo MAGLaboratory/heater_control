@@ -5,6 +5,7 @@ Description=Heater Controller
 User=heater
 Group=heater
 Restart=on-failure
+EnvironmentFile=/home/heater/heater_control/heater.env
 ExecStart=/home/heater/heater_control/heater_control.py
 
 [Install]
