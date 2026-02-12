@@ -212,7 +212,7 @@ class HC(mqtt.Client):
                     if fc == KP.BAK:
                         self.state = ParamValSt.Param
                 case ParamValSt.Save:
-                    self.state = ParamvalSt.Param
+                    self.state = ParamValSt.Param
 
             """ output """
             match self.state:
@@ -340,21 +340,28 @@ class HC(mqtt.Client):
         return rv
 
     def numedit(self, c_param, c_val, keycode):
+        """ this function is where the parameters are actually edited """
         """ make sure the keycode is current """
         if c_val and (self.last_button != keycode) and (keycode & KP.ACT):
             """ hacky way to use the KP_ACT as an 'and' mask """
             button_code = keycode & (KP.ACT - 1)
-            logging.debug(f"Button Press Recorded: {button_code}")
-            if button_code == KP.UP:
-                self.config.temp["set_point"].val += 1
-                logging.info(f"Temp inc to {self.config.temp['set_point'].val / 10.0}")
-                self.start_cycle = True
-                self.process_temp()
-            elif button_code == KP.DWN:
-                self.config.temp["set_point"].val -= 1
-                logging.info(f"Temp dec to {self.config.temp['set_point'].val/ 10.0}")
-                self.start_cycle = True
-                self.process_temp()
+            if c_param > EParams.temperature and c_param < EParams.occupancy:
+                param_name = EParams(c_param).name
+                item = self.config.temp[param_name]
+                if button_code == KP.UP:
+                    item.val += item.change_by
+                    if (item.val > item.hi_lim):
+                        item.val = item.hi_lim
+                    logging.info(f"{param_name} inc to {item.val / (10.0 ** item.decimal)}")
+                    self.start_cycle = True
+                    self.process_temp()
+                elif button_code == KP.DWN:
+                    item.val -= item.change_by
+                    if (item.val < item.lo_lim):
+                        item.val = item.lo_lim
+                    logging.info(f"{param_name} dec to {item.val / (10.0 ** item.decimal)}")
+                    self.start_cycle = True
+                    self.process_temp()
 
         self.last_button = keycode
 
@@ -459,7 +466,7 @@ class HC(mqtt.Client):
         disp = []
         last_disp = []
         param = 0
-        val = True
+        value = True
         buttonrepeatsm = ButtonRepeatSM()
         paramvaluesm = HC.ParamValueSM()
 
@@ -477,7 +484,7 @@ class HC(mqtt.Client):
             """ run param / value SM """
             param, value = paramvaluesm.run(button)
             """ insert the number editor here """
-            self.numedit(param, val, button)
+            self.numedit(param, value, button)
                 
             """process on off and start timer here"""
             self.handle_modbus(self.instr.write_bit, 0, self.heater_on)
