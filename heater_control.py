@@ -195,14 +195,14 @@ class HC(mqtt.Client):
             match self.state:
                 case ParamValSt.Param:
                     if fc == KP.UP:
-                        self.param += 1
-                        if (self.param >= len(EParams)):
-                            self.param = 0
-                    if fc == KP.DWN:
                         if (self.param == 0):
                             self.param = len(EParams) - 1
                         else:
                             self.param -= 1
+                    if fc == KP.DWN:
+                        self.param += 1
+                        if (self.param >= len(EParams)):
+                            self.param = 0
                     if fc == KP.ENT:
                         if self.param < EParams.save:
                             self.state = ParamValSt.Value
