@@ -52,7 +52,7 @@ class ParamValSt(IntEnum):
 
 class ButtonRepeatSM:
     initial_dly = 9
-    repeat_dly = 3 # -2 for one state and counting
+    repeat_dly = 2 # -2 for one state and counting
     def __init__(self):
         self.state = RepeatSt.ButtonRest
         self.last_kc = 0
