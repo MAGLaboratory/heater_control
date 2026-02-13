@@ -7,7 +7,98 @@ from dataclasses_json import dataclass_json
 from threading import Event
 from typing import *
 from ctypes import c_uint16
+from enum import Enum, IntEnum, unique
 
+@unique
+class KP(IntEnum):
+    ACT = 0x40
+    UP  = 0x1C
+    LFT = 0x36
+    ENT = 0x24
+    RHT = 0X16
+    DWN = 0x26
+    BAK = 0x1E
+
+@unique
+class DS(Enum):
+    TEMP = (0x7873, 0x0000)
+    OCC =  (0x3f58, 0x5800)
+    SAVE = (0x6d77, 0x1c79)
+    YES =  (0x6e79, 0x6d00)
+    NO =   (0x543f, 0x0000)
+
+@unique
+class EParams(IntEnum):
+    temperature = 0
+    set_point = 1
+    filter_ratio = 2
+    hysteresis = 3
+    start_time = 4
+    occupancy = 5
+    save = 6
+
+@unique
+class RepeatSt(IntEnum):
+    ButtonRest = 1
+    ButtonDown = 2
+    ButtonRepeat = 3
+    ButtonDownDown = 4
+
+@unique
+class ParamValSt(IntEnum):
+    Param = 1
+    Value = 2
+    Save = 3
+
+class ButtonRepeatSM:
+    initial_dly = 9
+    repeat_dly = 2 # -2 for one state and counting
+    def __init__(self):
+        self.state = RepeatSt.ButtonRest
+        self.last_kc = 0
+        self.time = c_uint16(0)
+
+    def run(self, cycle, keycode):
+        button_down = keycode & KP.ACT
+        self.last_kc = keycode
+        """ transitions """
+        match self.state:
+            case RepeatSt.ButtonRest:
+                if (button_down != 0):
+                    self.state = RepeatSt.ButtonDown
+                    self.time = copy.copy(cycle)
+            case RepeatSt.ButtonDown:
+                if (button_down == 0):
+                    self.state = RepeatSt.ButtonRest
+                elif self.last_kc != keycode:
+                    self.state = RepeatSt.ButtonDown
+                    self.time = copy.copy(cycle)
+                elif c_uint16(cycle.value - self.time.value).value >= ButtonRepeatSM.initial_dly:
+                    self.state = RepeatSt.ButtonRepeat
+            case RepeatSt.ButtonRepeat:
+                if button_down == 0:
+                    self.state = RepeatSt.ButtonRest
+                elif self.last_kc != keycode:
+                    self.state = RepeatSt.ButtonDown
+                    self.time = copy.copy(cycle)
+                else:
+                    self.state = RepeatSt.ButtonDownDown
+                    self.time = copy.copy(cycle)
+            case RepeatSt.ButtonDownDown:
+                if button_down == 0:
+                    self.state = RepeatSt.ButtonRest
+                elif self.last_kc != keycode:
+                    self.state = RepeatSt.ButtonDown
+                    self.time = copy.copy(cycle)
+                elif c_uint16(cycle.value - self.time.value).value >= ButtonRepeatSM.repeat_dly:
+                    self.state = RepeatSt.ButtonRepeat
+
+        """ output """
+        if self.state == RepeatSt.ButtonRepeat:
+            return keycode ^ KP.ACT
+        
+        return keycode
+          
 @dataclass_json
 @dataclass
 class Temp_Item:
@@ -66,20 +157,6 @@ class HC(mqtt.Client):
     ]
 
     DIGITS = 4
-    DS_TEMP = (0x7873, 0x0000)
-    DS_OCC =  (0x3f58, 0x5800)
-    DS_SAVE = (0x6d77, 0x1c79)
-    DS_YES =  (0x6e79, 0x6d00)
-    DS_NO =   (0x543f, 0x0000)
-
-    KP_ACT = 0x40
-    KP_UP  = 0x1C
-    KP_LFT = 0x36
-    KP_ENT = 0x24
-    KP_RHT = 0X16
-    KP_DWN = 0x26
-    KP_BAK = 0x1E
-
     class Temp_IIR:
         first_sample_done = False
         y = 0.0
@@ -93,6 +170,59 @@ class HC(mqtt.Client):
             self.y = self.a*x + (1.0-self.a)*self.y if self.first_sample_done else x
             self.first_sample_done = True
             return self.y
+
+    class ParamValueSM:
+        def __init__(self):
+            self.state = ParamValSt.Value
+            self.param = EParams.temperature
+            self.last_kc = 0
+    
+        def run(self, keycode):
+            # simplify keycodes because this function is only made for four
+            fc = 0
+            if (keycode & KP.ACT) and (keycode != self.last_kc):
+                fc = keycode
+                fc ^= KP.ACT
+                if (fc == KP.RHT):
+                    fc = KP.ENT
+                elif (fc == KP.LFT):
+                    fc = KP.BAK
+                # fcs for up and down are omitted
+                # fcs for enter and back are also omitted
+            self.last_kc = keycode
+   
+            """ transitions """
+            match self.state:
+                case ParamValSt.Param:
+                    if fc == KP.UP:
+                        if (self.param == 0):
+                            self.param = len(EParams) - 1
+                        else:
+                            self.param -= 1
+                    if fc == KP.DWN:
+                        self.param += 1
+                        if (self.param >= len(EParams)):
+                            self.param = 0
+                    if fc == KP.ENT:
+                        if self.param < EParams.save:
+                            self.state = ParamValSt.Value
+                        else:
+                            self.state = ParamValSt.Save
+                case ParamValSt.Value:
+                    if fc == KP.BAK:
+                        self.state = ParamValSt.Param
+                case ParamValSt.Save:
+                    self.state = ParamValSt.Param
+
+            """ output """
+            match self.state:
+                case ParamValSt.Param:
+                    return (self.param, False)
+                case ParamValSt.Value:
+                    return (self.param, True)
+                case ParamValSt.Save:
+                    return (self.param, True)
+                            
 
     def process_temp(self):
         hysteresis = self.config.temp["hysteresis"].val
@@ -209,25 +339,31 @@ class HC(mqtt.Client):
                            << (0 if i % 2 else 8))
         return rv
 
-    def param_sel(self, c_param, c_val, keycode):
+    def numedit(self, c_param, c_val, keycode):
+        """ this function is where the parameters are actually edited """
         """ make sure the keycode is current """
-        if (self.last_button != keycode) and (keycode & self.KP_ACT):
+        if c_val and (self.last_button != keycode) and (keycode & KP.ACT):
             """ hacky way to use the KP_ACT as an 'and' mask """
-            button_code = keycode & (self.KP_ACT - 1)
-            logging.debug(f"Button Press Recorded: {button_code}")
-            if button_code == self.KP_UP:
-                self.config.temp["set_point"].val += 1
-                logging.info(f"Temp inc to {self.config.temp['set_point'].val / 10.0}")
-                self.start_cycle = True
-                self.process_temp()
-            elif button_code == self.KP_DWN:
-                self.config.temp["set_point"].val -= 1
-                logging.info(f"Temp dec to {self.config.temp['set_point'].val/ 10.0}")
-                self.start_cycle = True
-                self.process_temp()
+            button_code = keycode & (KP.ACT - 1)
+            if c_param > EParams.temperature and c_param < EParams.occupancy:
+                param_name = EParams(c_param).name
+                item = self.config.temp[param_name]
+                if button_code == KP.UP:
+                    item.val += item.change_by
+                    if (item.val > item.hi_lim):
+                        item.val = item.hi_lim
+                    logging.info(f"{param_name} inc to {item.val / (10.0 ** item.decimal)}")
+                    self.start_cycle = True
+                    self.process_temp()
+                elif button_code == KP.DWN:
+                    item.val -= item.change_by
+                    if (item.val < item.lo_lim):
+                        item.val = item.lo_lim
+                    logging.info(f"{param_name} dec to {item.val / (10.0 ** item.decimal)}")
+                    self.start_cycle = True
+                    self.process_temp()
 
         self.last_button = keycode
-        return c_param, c_val
 
     """
         The parameter display function takes a parameter index and a boolean.
@@ -258,9 +394,9 @@ class HC(mqtt.Client):
         else:
             param = i_param
             val = i_val
-        if param < 1:
+        if param <= EParams.temperature:
             """ temperature """
-            p_n = list(self.DS_TEMP)
+            p_n = list(DS.TEMP.value)
             p_v = (str(self.meas_temp // 10), 2)
         elif param < DIG_PARAM:
             postParam = param - 1
@@ -277,12 +413,12 @@ class HC(mqtt.Client):
             match postParam:
                 case 0:
                     """ occupancy """ 
-                    p_n = list(self.DS_OCC)
+                    p_n = list(DS.OCC.value)
                     """ occupancy not implement yet """
-                    p_v = list(self.DS_YES)
+                    p_v = list(DS.YES.value)
                 case 1:
                     """ save """
-                    p_n = list(self.DS_SAVE)
+                    p_n = list(DS.SAVE.value)
 
         """ Display either the parameter name or the value """
         if val == False:
@@ -301,7 +437,6 @@ class HC(mqtt.Client):
         start = time.monotonic()
         last_cycle_overrun = 0
         self.main_cycle = c_uint16(0)
-        last_cycle = self.main_cycle
 
         try:
             if type(logging.getLevelName(self.config.loglevel.upper())) is int:
@@ -331,7 +466,9 @@ class HC(mqtt.Client):
         disp = []
         last_disp = []
         param = 0
-        val = True
+        value = True
+        buttonrepeatsm = ButtonRepeatSM()
+        paramvaluesm = HC.ParamValueSM()
 
         self.connect(host=self.config.mqtt.broker, port=self.config.mqtt.port,
                      keepalive=self.config.mqtt.timeout)
@@ -342,8 +479,12 @@ class HC(mqtt.Client):
             self.main_cycle.value += 1
             """get button press here"""
             button = self.handle_modbus(self.instr.read_register, 0, functioncode = 4)
-            """ TODO: break out into number editor """
-            param, val = self.param_sel(param, val, button)
+            """ run button repeat SM """
+            button = buttonrepeatsm.run(self.main_cycle, button)
+            """ run param / value SM """
+            param, value = paramvaluesm.run(button)
+            """ insert the number editor here """
+            self.numedit(param, value, button)
                 
             """process on off and start timer here"""
             self.handle_modbus(self.instr.write_bit, 0, self.heater_on)
@@ -363,7 +504,7 @@ class HC(mqtt.Client):
                     self.start_cycle_timer.value = c_uint16(self.main_cycle.value - st_val - 1).value
             """output display here"""
             last_disp = disp
-            disp = self.param_scroll()
+            disp = self.param_scroll(False, param, value)
             even_odd = self.main_cycle.value % 2
             self.handle_modbus(self.instr.write_register, even_odd, disp[even_odd])
 
