@@ -26,6 +26,7 @@ class DS(Enum):
     SAVE = (0x6d77, 0x1c79)
     YES =  (0x6e79, 0x6d00)
     NO =   (0x543f, 0x0000)
+    FYES = (0x716e, 0x796d)
 
 @unique
 class EParams(IntEnum):
@@ -438,6 +439,7 @@ class HC(mqtt.Client):
         last_cycle_overrun = 0
         self.main_cycle = c_uint16(0)
 
+        """ log levels """
         try:
             if type(logging.getLevelName(self.config.loglevel.upper())) is int:
                 logging.basicConfig(level=self.config.loglevel.upper())
@@ -446,14 +448,17 @@ class HC(mqtt.Client):
         except (KeyError, AttributeError) as e:
             logging.warning("Log level not configured.  Defaulting to WARNING.  Caught: " + str(e))
 
+        """ set signal handlers """
         signal.signal(signal.SIGINT, self.signal_handler)
         signal.signal(signal.SIGTERM, self.signal_handler)
 
+        """ modbus """
         self.instr = minimalmodbus.Instrument(self.config.modbus.port, self.config.modbus.sid)
         self.instr.serial.baudrate = self.config.modbus.baud
         self.instr.serial.timeout = self.config.modbus.timeout
         self.instr.serial.clear_buffers_before_each_transaction = False
 
+        """ heater control """
         self.fil = HC.Temp_IIR(self.config.temp["set_point"].val / 10.0, self.config.temp["filter_ratio"].val / 1000.0)
         self.meas_temp = self.config.temp["set_point"].val * 100
         self.start_cycle = True
@@ -461,6 +466,10 @@ class HC(mqtt.Client):
         self.start_cycle_timer = copy.copy(self.main_cycle)
         self.heater_on = 0
 
+        """ occupancy """
+        self.focc = True # temporarily forced until we figure out occupancy
+
+        """ user interface """
         button = 0
         self.last_button = 0
         disp = []
@@ -470,6 +479,7 @@ class HC(mqtt.Client):
         buttonrepeatsm = ButtonRepeatSM()
         paramvaluesm = HC.ParamValueSM()
 
+        """ start MQTT """
         self.connect(host=self.config.mqtt.broker, port=self.config.mqtt.port,
                      keepalive=self.config.mqtt.timeout)
         self.loop_start()
