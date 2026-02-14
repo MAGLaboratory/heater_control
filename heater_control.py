@@ -51,6 +51,12 @@ class ParamValSt(IntEnum):
     Value = 2
     Save = 3
 
+@unique
+class OccSt(IntEnum):
+    cold = 0
+    hot = 1
+    warm = 2
+
 class ButtonRepeatSM:
     initial_dly = 9
     repeat_dly = 2 # -2 for one state and counting
@@ -61,6 +67,8 @@ class ButtonRepeatSM:
 
     def run(self, cycle, keycode):
         button_down = keycode & KP.ACT
+        if button_down and keycode != self.last_kc:
+            logging.debug(f"Key Pressed: {keycode:x}")
         self.last_kc = keycode
         """ transitions """
         match self.state:
@@ -99,7 +107,38 @@ class ButtonRepeatSM:
             return keycode ^ KP.ACT
         
         return keycode
-          
+
+class OccSm:
+    cold_dly = 1800
+    def __init__(self):
+        self.state = OccSt.cold
+        self.time = c_uint16(0)
+
+    def run(self, cycle, data):
+        match self.state:
+            case OccSt.cold:
+                """ higher threshold to mark the space occupied """
+                if sum(data.values()) > 1:
+                    self.state = OccSt.hot
+                    logging.info("Space is now: {self.state.name}")
+            case OccSt.hot:
+                if sum(data.values()) < 1:
+                    self.state = OccSt.warm
+                    self.time = copy.copy(cycle)
+                    logging.info("Space is now: {self.state.name}")
+            case OccSt.warm:
+                """ mark the space cold if no motion recorded for a while """
+                if sum(data.values()) > 0:
+                    self.state = OccSt.warm
+                    logging.info("Space is now: {self.state.name}")
+                elif c_uint16(cycle.value - self.time.value).value >= OccSm.cold_dly:
+                    self.state = OccSt.cold
+                    logging.info("Space is now: {self.state.name}")
+
+        if self.state == OccSt.cold:
+            return False
+        return True
+
 @dataclass_json
 @dataclass
 class Temp_Item:
@@ -277,20 +316,34 @@ class HC(mqtt.Client):
 
     def on_message(self, client, userdata, message):
         if message.topic in self.config.mqtt.data_sources:
-            try:
-                decoded = message.payload.decode('utf-8')
-                logging.info(f"Received Message: {decoded}")
-                data = json.loads(decoded)
-                if self.config.mqtt.temp_source in data:
-                    logging.info(f"Received temperature: {data[self.config.mqtt.temp_source]}")
-                    self.meas_temp = int(data[self.config.mqtt.temp_source]) 
-                    self.fil.filt(self.meas_temp / 1000.0)
-                    self.process_temp()
-                else: 
-                    logging.warning(f"Message received without {self.config.mqtt.temp_source}")
-            except Exception as err:
-                tb = traceback.format_exc()
-                logging.warning(f"L {sys._getframe().f_back.f_lineno} Caught exception: {err}\nTraceback:\n{tb}")
+            if (message.topic.endswith("checkup")):
+                try:
+                    decoded = message.payload.decode('utf-8')
+                    logging.debug(f"Received Message: {decoded}")
+                    has_motion = False
+                    data = json.loads(decoded)
+                    if self.config.mqtt.temp_source in data:
+                        logging.info(f"Received temperature: {data[self.config.mqtt.temp_source]}")
+                        self.meas_temp = int(data[self.config.mqtt.temp_source]) 
+                        self.fil.filt(self.meas_temp / 1000.0)
+                        self.process_temp()
+                    for (key, val) in data.items():
+                        if not key.endswith("Motion"):
+                            continue
+                        has_motion = True
+                        if (not key in self.motion) or val == 1:
+                            self.motion[key] = val
+                    if has_motion:
+                        logging.info(f"Motion Status: {self.motion}")
+                        self.occ = self.occ_sm.run(self.main_cycle, self.motion)
+                except Exception as err:
+                    tb = traceback.format_exc()
+                    logging.warning(f"L {sys._getframe().f_back.f_lineno} Caught exception: {err}\nTraceback:\n{tb}")
+            elif (message.topic.endswith("checkup_req")):
+                """ process motion monitoring """
+                """ yes, there is a state machine in here """
+                self.occ = self.occ_sm.run(self.main_cycle, self.motion)
+                self.motion = {}
 
     def handle_modbus(self, fn, *params, **kwparams):
         tries = 5
@@ -363,6 +416,10 @@ class HC(mqtt.Client):
                     logging.info(f"{param_name} dec to {item.val / (10.0 ** item.decimal)}")
                     self.start_cycle = True
                     self.process_temp()
+            elif c_param == EParams.occupancy:
+                """ either button press directions inverts the forced occupancy """
+                if button_code == KP.UP or button_code == KP.DWN:
+                    self.focc = not self.focc
 
         self.last_button = keycode
 
@@ -415,8 +472,11 @@ class HC(mqtt.Client):
                 case 0:
                     """ occupancy """ 
                     p_n = list(DS.OCC.value)
-                    """ occupancy not implement yet """
-                    p_v = list(DS.YES.value)
+                    """ occupancy display, forced occupancy takes precedence """
+                    if self.focc:
+                        p_v = list(DS.FYES.value)
+                    else:
+                        p_v = list(DS.YES.value) if self.occ else list(DS.NO.value)
                 case 1:
                     """ save """
                     p_n = list(DS.SAVE.value)
@@ -468,6 +528,9 @@ class HC(mqtt.Client):
 
         """ occupancy """
         self.focc = True # temporarily forced until we figure out occupancy
+        self.occ = True # assume occupied by default
+        self.occ_sm = OccSm()
+        self.motion = {}
 
         """ user interface """
         button = 0
