@@ -49,7 +49,8 @@ class RepeatSt(IntEnum):
 class ParamValSt(IntEnum):
     Param = 1
     Value = 2
-    Save = 3
+    BreakSetPoint = 3
+    Save = 4
 
 @unique
 class OccSt(IntEnum):
@@ -68,7 +69,7 @@ class ButtonRepeatSM:
     def run(self, cycle, keycode):
         button_down = keycode & KP.ACT
         if button_down and keycode != self.last_kc:
-            logging.debug(f"Key Pressed: {keycode:x}")
+            logging.debug(f"Key Pressed: 0x{keycode^button_down:x}")
         self.last_kc = keycode
         """ transitions """
         match self.state:
@@ -109,7 +110,7 @@ class ButtonRepeatSM:
         return keycode
 
 class OccSm:
-    cold_dly = 1800
+    cold_dly = 18000
     def __init__(self):
         self.state = OccSt.cold
         self.time = c_uint16(0)
@@ -212,12 +213,14 @@ class HC(mqtt.Client):
             return self.y
 
     class ParamValueSM:
+        sp_time = 10
         def __init__(self):
             self.state = ParamValSt.Value
             self.param = EParams.temperature
             self.last_kc = 0
+            self.time = c_uint16(0)
     
-        def run(self, keycode):
+        def run(self, main_cycle, keycode):
             # simplify keycodes because this function is only made for four
             fc = 0
             if (keycode & KP.ACT) and (keycode != self.last_kc):
@@ -251,6 +254,16 @@ class HC(mqtt.Client):
                 case ParamValSt.Value:
                     if fc == KP.BAK:
                         self.state = ParamValSt.Param
+                    if self.param == EParams.temperature and (fc == KP.UP or fc == KP.DWN):
+                        self.state = ParamValSt.BreakSetPoint
+                        self.time = copy.copy(main_cycle)
+                case ParamValSt.BreakSetPoint:
+                    if fc == KP.BAK:
+                        self.state = ParamValSt.Param
+                    if fc == KP.UP or fc==KP.DWN:
+                        self.time = copy.copy(main_cycle)
+                    if c_uint16(main_cycle.value - self.time.value).value > HC.ParamValueSM.sp_time:
+                        self.state = ParamValSt.Value
                 case ParamValSt.Save:
                     self.state = ParamValSt.Param
 
@@ -260,11 +273,13 @@ class HC(mqtt.Client):
                     return (self.param, False)
                 case ParamValSt.Value:
                     return (self.param, True)
+                case ParamValSt.BreakSetPoint:
+                    return (EParams.set_point, True)
                 case ParamValSt.Save:
                     return (self.param, True)
                             
 
-    def process_temp(self):
+    def process_temp(self, editing = False):
         hysteresis = self.config.temp["hysteresis"].val
         """Determine heater on/off command"""
         if (self.start_cycle == True):
@@ -278,15 +293,18 @@ class HC(mqtt.Client):
             self.heater_on = 0
         elif (self.meas_temp // 100) < self.low_point:
             self.heater_on = 1
-        """Build our response message"""
-        temp_dict = {"HeaterControl Fil Temp" : int(round(self.fil.y * 1000.0)),
-                     "HeaterControl Set High" : self.high_point * 100,
-                     "HeaterControl Set Low" : self.low_point * 100,
-                     "HeaterControl Start Cycle" : int(self.start_cycle),
-                     "HeaterControl On" : self.heater_on,
-                     "time": time.time()}
-        logging.info(f"Publishing: {str(temp_dict)}")
-        self.publish(f"{self.config.name}/event", json.dumps(temp_dict))
+        if not editing:
+            """Build our response message"""
+            temp_dict = {"HeaterControl Fil Temp" : int(round(self.fil.y * 1000.0)),
+                         "HeaterControl Set High" : self.high_point * 100,
+                         "HeaterControl Set Low" : self.low_point * 100,
+                         "HeaterControl Start Cycle" : int(self.start_cycle),
+                         "HeaterControl F Occu": int(self.focc),
+                         "HeaterControl Occu" : int(self.occ),
+                         "HeaterControl On" : self.heater_on,
+                         "time": time.time()}
+            logging.info(f"Publishing: {str(temp_dict)}")
+            self.publish(f"{self.config.name}/event", json.dumps(temp_dict))
 
     def signal_handler(self, signum, _):
         """signal handling helper function"""
@@ -323,7 +341,7 @@ class HC(mqtt.Client):
                     has_motion = False
                     data = json.loads(decoded)
                     if self.config.mqtt.temp_source in data:
-                        logging.info(f"Received temperature: {data[self.config.mqtt.temp_source]}")
+                        logging.debug(f"Received temperature: {data[self.config.mqtt.temp_source]}")
                         self.meas_temp = int(data[self.config.mqtt.temp_source]) 
                         self.fil.filt(self.meas_temp / 1000.0)
                         self.process_temp()
@@ -408,14 +426,14 @@ class HC(mqtt.Client):
                         item.val = item.hi_lim
                     logging.info(f"{param_name} inc to {item.val / (10.0 ** item.decimal)}")
                     self.start_cycle = True
-                    self.process_temp()
+                    self.process_temp(True)
                 elif button_code == KP.DWN:
                     item.val -= item.change_by
                     if (item.val < item.lo_lim):
                         item.val = item.lo_lim
                     logging.info(f"{param_name} dec to {item.val / (10.0 ** item.decimal)}")
                     self.start_cycle = True
-                    self.process_temp()
+                    self.process_temp(True)
             elif c_param == EParams.occupancy:
                 """ either button press directions inverts the forced occupancy """
                 if button_code == KP.UP or button_code == KP.DWN:
@@ -522,13 +540,12 @@ class HC(mqtt.Client):
         self.fil = HC.Temp_IIR(self.config.temp["set_point"].val / 10.0, self.config.temp["filter_ratio"].val / 1000.0)
         self.meas_temp = self.config.temp["set_point"].val * 100
         self.start_cycle = True
-        self.last_start_cycle = True
         self.start_cycle_timer = copy.copy(self.main_cycle)
         self.heater_on = 0
 
         """ occupancy """
-        self.focc = True # temporarily forced until we figure out occupancy
-        self.occ = True # assume occupied by default
+        self.focc = False
+        self.occ = False
         self.occ_sm = OccSm()
         self.motion = {}
 
@@ -555,24 +572,22 @@ class HC(mqtt.Client):
             """ run button repeat SM """
             button = buttonrepeatsm.run(self.main_cycle, button)
             """ run param / value SM """
-            param, value = paramvaluesm.run(button)
+            param, value = paramvaluesm.run(self.main_cycle, button)
             """ insert the number editor here """
             self.numedit(param, value, button)
                 
             """process on off and start timer here"""
             self.handle_modbus(self.instr.write_bit, 0, self.heater_on)
             if (self.heater_on != 0):
-                if (self.last_start_cycle == True):
+                if (self.start_cycle == True):
                     logging.debug("Control start cycle deactivated")
-                self.last_start_cycle = self.start_cycle
                 self.start_cycle = False
                 self.start_cycle_timer = copy.copy(self.main_cycle)
             else:
                 st_val = self.config.temp["start_time"].val * 600
                 if c_uint16(self.main_cycle.value - self.start_cycle_timer.value).value > st_val:
-                    if (self.last_start_cycle == False):
+                    if (self.start_cycle == False):
                         logging.debug("Control start cycle activated")
-                    self.last_start_cycle = self.start_cycle
                     self.start_cycle = True
                     self.start_cycle_timer.value = c_uint16(self.main_cycle.value - st_val - 1).value
             """output display here"""
