@@ -131,6 +131,7 @@ class OccSm:
                 """ mark the space cold if no motion recorded for a while """
                 if sum(data.values()) > 0:
                     self.state = OccSt.warm
+                    self.time = copy.copy(cycle)
                     logging.info("Space is now: {self.state.name}")
                 elif c_uint16(cycle.value - self.time.value).value >= OccSm.cold_dly:
                     self.state = OccSt.cold
@@ -292,7 +293,7 @@ class HC(mqtt.Client):
         if self.fil.y > (self.high_point / 10.0):
             self.heater_on = 0
         elif (self.meas_temp // 100) < self.low_point:
-            self.heater_on = 1
+            self.heater_on = int(self.occ or self.focc)
         if not editing:
             """Build our response message"""
             temp_dict = {"HeaterControl Fil Temp" : int(round(self.fil.y * 1000.0)),
