@@ -121,21 +121,21 @@ class OccSm:
                 """ higher threshold to mark the space occupied """
                 if sum(data.values()) > 1:
                     self.state = OccSt.hot
-                    logging.info("Space is now: {self.state.name}")
+                    logging.info(f"Space is now: {self.state.name}")
             case OccSt.hot:
                 if sum(data.values()) < 1:
                     self.state = OccSt.warm
                     self.time = copy.copy(cycle)
-                    logging.info("Space is now: {self.state.name}")
+                    logging.info(f"Space is now: {self.state.name}")
             case OccSt.warm:
                 """ mark the space cold if no motion recorded for a while """
                 if sum(data.values()) > 0:
                     self.state = OccSt.warm
                     self.time = copy.copy(cycle)
-                    logging.info("Space is now: {self.state.name}")
+                    logging.info(f"Space is now: {self.state.name}")
                 elif c_uint16(cycle.value - self.time.value).value >= OccSm.cold_dly:
                     self.state = OccSt.cold
-                    logging.info("Space is now: {self.state.name}")
+                    logging.info(f"Space is now: {self.state.name}")
 
         if self.state == OccSt.cold:
             return False
@@ -293,19 +293,20 @@ class HC(mqtt.Client):
         if self.fil.y > (self.high_point / 10.0):
             self.heater_on = 0
         elif (self.meas_temp // 100) < self.low_point:
-            self.heater_on = int(self.occ or self.focc)
+            self.heater_on = 1
         if not editing:
             """Build our response message"""
-            temp_dict = {"HeaterControl Fil Temp" : int(round(self.fil.y * 1000.0)),
-                         "HeaterControl Set High" : self.high_point * 100,
-                         "HeaterControl Set Low" : self.low_point * 100,
-                         "HeaterControl Start Cycle" : int(self.start_cycle),
-                         "HeaterControl F Occu": int(self.focc),
-                         "HeaterControl Occu" : int(self.occ),
-                         "HeaterControl On" : self.heater_on,
-                         "time": time.time()}
-            logging.info(f"Publishing: {str(temp_dict)}")
-            self.publish(f"{self.config.name}/event", json.dumps(temp_dict))
+            final_heater_on = int(self.heater_on and (self.focc or self.occ))
+            self.checkup_msg.update({"HeaterControl Fil Temp": int(round(self.fil.y * 1000.0)),
+                        "HeaterControl Set High": self.high_point * 100,
+                        "HeaterControl Set Low": self.low_point * 100,
+                        "HeaterControl Start Cycle": int(self.start_cycle),
+                        "HeaterControl Temp On": self.heater_on,
+                        "HeaterControl F Occu": int(self.focc),
+                        "HeaterControl Occu": int(self.occ),
+                        "HeaterControl On": final_heater_on})
+            self.last_final_heater_on = final_heater_on
+            self.checkup_pub = True
 
     def signal_handler(self, signum, _):
         """signal handling helper function"""
@@ -335,17 +336,12 @@ class HC(mqtt.Client):
 
     def on_message(self, client, userdata, message):
         if message.topic in self.config.mqtt.data_sources:
-            if (message.topic.endswith("checkup")):
+            if (message.topic.endswith("checkup") or message.topic.endswith("event")):
                 try:
                     decoded = message.payload.decode('utf-8')
                     logging.debug(f"Received Message: {decoded}")
                     has_motion = False
                     data = json.loads(decoded)
-                    if self.config.mqtt.temp_source in data:
-                        logging.debug(f"Received temperature: {data[self.config.mqtt.temp_source]}")
-                        self.meas_temp = int(data[self.config.mqtt.temp_source]) 
-                        self.fil.filt(self.meas_temp / 1000.0)
-                        self.process_temp()
                     for (key, val) in data.items():
                         if not key.endswith("Motion"):
                             continue
@@ -355,6 +351,11 @@ class HC(mqtt.Client):
                     if has_motion:
                         logging.info(f"Motion Status: {self.motion}")
                         self.occ = self.occ_sm.run(self.main_cycle, self.motion)
+                    if self.config.mqtt.temp_source in data:
+                        logging.debug(f"Received temperature: {data[self.config.mqtt.temp_source]}")
+                        self.meas_temp = int(data[self.config.mqtt.temp_source])
+                        self.fil.filt(self.meas_temp / 1000.0)
+                        self.process_temp()
                 except Exception as err:
                     tb = traceback.format_exc()
                     logging.warning(f"L {sys._getframe().f_back.f_lineno} Caught exception: {err}\nTraceback:\n{tb}")
@@ -537,7 +538,7 @@ class HC(mqtt.Client):
         self.instr.serial.timeout = self.config.modbus.timeout
         self.instr.serial.clear_buffers_before_each_transaction = False
 
-        """ heater control """
+        """ temperature-based heater control """
         self.fil = HC.Temp_IIR(self.config.temp["set_point"].val / 10.0, self.config.temp["filter_ratio"].val / 1000.0)
         self.meas_temp = self.config.temp["set_point"].val * 100
         self.start_cycle = True
@@ -549,6 +550,13 @@ class HC(mqtt.Client):
         self.occ = False
         self.occ_sm = OccSm()
         self.motion = {}
+
+        """ final heater control """
+        self.last_final_heater_on = 0
+
+        """ checkup info """
+        self.checkup_pub = False
+        self.checkup_msg = {}
 
         """ user interface """
         button = 0
@@ -576,20 +584,35 @@ class HC(mqtt.Client):
             param, value = paramvaluesm.run(self.main_cycle, button)
             """ insert the number editor here """
             self.numedit(param, value, button)
-                
             """process on off and start timer here"""
-            self.handle_modbus(self.instr.write_bit, 0, self.heater_on)
+            final_heater_on = int(self.heater_on and (self.focc or self.occ))
+            self.handle_modbus(self.instr.write_bit, 0, final_heater_on)
+            if (self.last_final_heater_on != final_heater_on):
+                self.checkup_msg["HeaterControl On"] = final_heater_on
+            self.last_final_heater_on = final_heater_on
+            """Publish checkup or event on mqtt"""
+            if self.checkup_msg != {}:
+                self.checkup_msg["time"] = time.time()
+                self.publish(f"{self.config.name}/checkup" if self.checkup_pub
+                             else f"{self.config.name}/event", json.dumps(self.checkup_msg))
+                self.checkup_pub = False
+                logging.info(f"MQTT Publishing: {self.checkup_msg}")
+                self.checkup_msg = {}
+            """process control cycle kick"""
             if (self.heater_on != 0):
                 if (self.start_cycle == True):
-                    logging.debug("Control start cycle deactivated")
+                    logging.debug("Control cycle start deactivated")
+                    self.checkup_msg["HeaterControl Start Cycle"] = 0
                 self.start_cycle = False
                 self.start_cycle_timer = copy.copy(self.main_cycle)
             else:
                 st_val = self.config.temp["start_time"].val * 600
                 if c_uint16(self.main_cycle.value - self.start_cycle_timer.value).value > st_val:
                     if (self.start_cycle == False):
-                        logging.debug("Control start cycle activated")
+                        logging.debug("Control cycle start activated")
+                        self.checkup_msg["HeaterControl Start Cycle"] = 1
                     self.start_cycle = True
+                    """ do not allow the timer value to overflow """
                     self.start_cycle_timer.value = c_uint16(self.main_cycle.value - st_val - 1).value
             """output display here"""
             last_disp = disp
