@@ -45,11 +45,12 @@ class RepeatSt(IntEnum):
     ButtonRepeat = 3
     ButtonDownDown = 4
 
+""" set point hacking is named after seconds hacking in watch movements """
 @unique
 class ParamValSt(IntEnum):
     Param = 1
     Value = 2
-    BreakSetPoint = 3
+    HackSetPoint = 3
     Save = 4
 
 @unique
@@ -59,17 +60,17 @@ class OccSt(IntEnum):
     warm = 2
 
 class ButtonRepeatSM:
-    initial_dly = 9
-    repeat_dly = 2 # -2 for one state and counting
-    def __init__(self):
+    def __init__(self, initial_dly = 9, repeat_dly = 2):
         self.state = RepeatSt.ButtonRest
         self.last_kc = 0
         self.time = c_uint16(0)
+        self.initial_dly = initial_dly
+        self.repeat_dly = repeat_dly
 
     def run(self, cycle, keycode):
         button_down = keycode & KP.ACT
         if button_down and keycode != self.last_kc:
-            logging.debug(f"Key Pressed: 0x{keycode^button_down:x}")
+            logging.debug(f"Key Pressed: {KP(keycode^KP.ACT).name}")
         self.last_kc = keycode
         """ transitions """
         match self.state:
@@ -83,7 +84,7 @@ class ButtonRepeatSM:
                 elif self.last_kc != keycode:
                     self.state = RepeatSt.ButtonDown
                     self.time = copy.copy(cycle)
-                elif c_uint16(cycle.value - self.time.value).value >= ButtonRepeatSM.initial_dly:
+                elif c_uint16(cycle.value - self.time.value).value >= self.initial_dly:
                     self.state = RepeatSt.ButtonRepeat
             case RepeatSt.ButtonRepeat:
                 if button_down == 0:
@@ -100,7 +101,7 @@ class ButtonRepeatSM:
                 elif self.last_kc != keycode:
                     self.state = RepeatSt.ButtonDown
                     self.time = copy.copy(cycle)
-                elif c_uint16(cycle.value - self.time.value).value >= ButtonRepeatSM.repeat_dly:
+                elif c_uint16(cycle.value - self.time.value).value >= self.repeat_dly:
                     self.state = RepeatSt.ButtonRepeat
 
         """ output """
@@ -110,10 +111,11 @@ class ButtonRepeatSM:
         return keycode
 
 class OccSm:
-    cold_dly = 18000
-    def __init__(self):
+    def __init__(self, cold_dly = 18000):
         self.state = OccSt.cold
+        self.last_state = OccSt.cold
         self.time = c_uint16(0)
+        self.cold_dly = cold_dly
 
     def run(self, cycle, data):
         match self.state:
@@ -121,21 +123,21 @@ class OccSm:
                 """ higher threshold to mark the space occupied """
                 if sum(data.values()) > 1:
                     self.state = OccSt.hot
-                    logging.info(f"Space is now: {self.state.name}")
             case OccSt.hot:
                 if sum(data.values()) < 1:
                     self.state = OccSt.warm
                     self.time = copy.copy(cycle)
-                    logging.info(f"Space is now: {self.state.name}")
             case OccSt.warm:
                 """ mark the space cold if no motion recorded for a while """
                 if sum(data.values()) > 0:
                     self.state = OccSt.warm
                     self.time = copy.copy(cycle)
-                    logging.info(f"Space is now: {self.state.name}")
-                elif c_uint16(cycle.value - self.time.value).value >= OccSm.cold_dly:
+                elif c_uint16(cycle.value - self.time.value).value >= self.cold_dly:
                     self.state = OccSt.cold
-                    logging.info(f"Space is now: {self.state.name}")
+
+        if self.state != self.last_state:
+            logging.info(f"Space occupancy is now {self.state.name}")
+        self.last_state = self.state
 
         if self.state == OccSt.cold:
             return False
@@ -214,19 +216,21 @@ class HC(mqtt.Client):
             return self.y
 
     class ParamValueSM:
-        sp_time = 10
-        def __init__(self):
+        def __init__(self, sp_time = 10):
             self.state = ParamValSt.Value
+            self.last_state = ParamValSt.Value
             self.param = EParams.temperature
+            self.last_param = EParams.temperature
             self.last_kc = 0
             self.time = c_uint16(0)
+            self.sp_time = sp_time
     
         def run(self, main_cycle, keycode):
-            # simplify keycodes because this function is only made for four
             fc = 0
+            """ simplify keycodes """
             if (keycode & KP.ACT) and (keycode != self.last_kc):
                 fc = keycode
-                fc ^= KP.ACT
+                fc ^= KP.ACT # since the KP.ACT bit is expected, we can always cancel it
                 if (fc == KP.RHT):
                     fc = KP.ENT
                 elif (fc == KP.LFT):
@@ -248,25 +252,35 @@ class HC(mqtt.Client):
                         if (self.param >= len(EParams)):
                             self.param = 0
                     if fc == KP.ENT:
-                        if self.param < EParams.save:
+                        if self.param != EParams.save:
                             self.state = ParamValSt.Value
                         else:
                             self.state = ParamValSt.Save
+                    if fc == KP.BAK:
+                        self.param = EParams.temperature
                 case ParamValSt.Value:
                     if fc == KP.BAK:
                         self.state = ParamValSt.Param
                     if self.param == EParams.temperature and (fc == KP.UP or fc == KP.DWN):
-                        self.state = ParamValSt.BreakSetPoint
+                        self.state = ParamValSt.HackSetPoint
                         self.time = copy.copy(main_cycle)
-                case ParamValSt.BreakSetPoint:
+                case ParamValSt.HackSetPoint:
                     if fc == KP.BAK:
                         self.state = ParamValSt.Param
                     if fc == KP.UP or fc==KP.DWN:
                         self.time = copy.copy(main_cycle)
-                    if c_uint16(main_cycle.value - self.time.value).value > HC.ParamValueSM.sp_time:
+                    if c_uint16(main_cycle.value - self.time.value).value > self.sp_time:
                         self.state = ParamValSt.Value
                 case ParamValSt.Save:
                     self.state = ParamValSt.Param
+
+            """ debug display """
+            if self.last_state != self.state:
+                logging.debug(f"Scrolling {self.state.name}")
+            self.last_state = self.state
+            if self.last_param != self.param:
+                logging.debug(f"Param on {EParams(self.param).name}")
+            self.last_param = self.param
 
             """ output """
             match self.state:
@@ -274,7 +288,7 @@ class HC(mqtt.Client):
                     return (self.param, False)
                 case ParamValSt.Value:
                     return (self.param, True)
-                case ParamValSt.BreakSetPoint:
+                case ParamValSt.HackSetPoint:
                     return (EParams.set_point, True)
                 case ParamValSt.Save:
                     return (self.param, True)
