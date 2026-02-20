@@ -35,7 +35,7 @@
 		}
 	},
 	"mqtt": {
-		"data_sources": ["daisy/checkup"],
+		"data_sources": ["daisy/checkup", "daisy/event", "haldor/checkup", "haldor/event", "reporter/checkup_req"],
 		"temp_source": "ShopB Temp",
 		"broker": "hal.maglab",
 		"port": 1883,
