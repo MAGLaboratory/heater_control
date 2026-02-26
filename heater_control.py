@@ -2,6 +2,7 @@
 import minimalmodbus
 import time, json, signal, os, logging, traceback, sys, copy
 import paho.mqtt.client as mqtt
+from pathlib import Path
 from dataclasses import dataclass
 from dataclasses_json import dataclass_json
 from threading import Event
@@ -172,6 +173,8 @@ class Modbus:
     baud: int
 
 class HC(mqtt.Client):
+    long_name = "heater_control"
+    cfg_file_name = "hc_config"
     @dataclass_json
     @dataclass
     class Config:
@@ -326,6 +329,30 @@ class HC(mqtt.Client):
         """signal handling helper function"""
         logging.critical(f"Caught a deadly signal: {signal.Signals(signum).name}")
         self.exit.set()
+
+    def __init__(self):
+        files = []
+        my_path = os.path.dirname(os.path.abspath(__file__))
+        logging.debug(f"Program installed at {my_path}")
+        if my_path.startswith("/usr"):
+            new_path = f"/etc/{HC.long_name}"
+            files = [new_path, f"{Path.home()}{os.sep}.config{os.sep}{HC.long_name}"]
+        else:
+            paths = [f"{Path.home()}{os.sep}.config{os.sep}{HC.long_name}", my_path]
+        for path in paths:
+            file = f"{path}{os.sep}{HC.cfg_file_name}.json"
+            logging.debug(f"Attempting to read {file}")
+            if not Path(file).is_file():
+                continue
+            with open(file, "r") as configFile:
+                logging.info(f"Reading Config File")
+                self.config = HC.Config.from_json(configFile.read())
+                logging.debug(f"{self.config}")
+            break
+        else:
+            raise FileNotFoundError("Not able to locate configuration file.")
+        logging.info("Starting")
+        super().__init__(mqtt.CallbackAPIVersion.VERSION2, self.config.name)
 
     def on_log(self, client, userdata, level, buf):
         if level == mqtt.MQTT_LOG_DEBUG:
@@ -659,13 +686,7 @@ class HC(mqtt.Client):
     where the source script exists.
 """
 if __name__ == "__main__":
-    heaterControl = HC(mqtt.CallbackAPIVersion.VERSION2, "heater_control")
-    my_path = os.path.dirname(os.path.abspath(__file__))
     logging.basicConfig(level=logging.DEBUG)
-    logging.info("Reading Config File")
-    with open(f"{my_path}{os.sep}hc_config.json", "r") as configFile:
-        heaterControl.config = HC.Config.from_json(configFile.read())
-        logging.debug(f"{heaterControl.config}")
-    logging.info("Starting")
+    heaterControl = HC()
     heaterControl.main()
 
