@@ -5,7 +5,7 @@ import paho.mqtt.client as mqtt
 from pathlib import Path
 from dataclasses import dataclass
 from dataclasses_json import dataclass_json
-from threading import Event
+from threading import Event, Thread
 from typing import *
 from ctypes import c_uint16
 from enum import Enum, IntEnum, unique
@@ -194,7 +194,8 @@ class HC(mqtt.Client):
         modbus: Modbus
         loglevel: Optional[str] = None
 
-    exit = Event()
+    exit_evt = Event()
+    connect_evt = Event()
 
     CHAR_LUT = [
         0x3f, 0x06, 0x5b, 0x4f,
@@ -328,7 +329,7 @@ class HC(mqtt.Client):
     def signal_handler(self, signum, _):
         """signal handling helper function"""
         logging.critical(f"Caught a deadly signal: {signal.Signals(signum).name}")
-        self.exit.set()
+        self.exit_evt.set()
 
     def __init__(self):
         files = []
@@ -374,6 +375,24 @@ class HC(mqtt.Client):
             logging.info(f"Connected: {str(rc)}")
             for src in self.config.mqtt.data_sources:
                 self.subscribe(src)
+            self.connect_evt.set()
+            try:
+                self.dct.join()
+            except:
+                pass
+
+    def on_disconnect(self, client, userdata, rc, properties):
+        """ handles mqtt disconnects """
+        self.connect_evt.clear()
+        if rc.is_failure:
+            self.dct = Thread(target=self.disconnect_thread)
+            self.dct.start()
+        # else graceful disconnection, do nothing
+
+    def disconnect_thread(self):
+        """ Sets the exit event if the timeout is not set in time """
+        if not self.connect_evt.wait(self.config.mqtt.timeout*3):
+            self.exit_evt.set()
 
     def on_message(self, client, userdata, message):
         if message.topic in self.config.mqtt.data_sources:
@@ -615,7 +634,7 @@ class HC(mqtt.Client):
         self.loop_start()
 
         start = time.monotonic()
-        while not self.exit.wait(nextWait):
+        while not self.exit_evt.wait(nextWait):
             self.main_cycle.value += 1
             """get button press here"""
             button = self.handle_modbus(self.instr.read_register, 0, functioncode = 4)
