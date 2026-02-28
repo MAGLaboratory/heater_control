@@ -28,6 +28,8 @@ class DS(Enum):
     YES =  (0x6e79, 0x6d00)
     NO =   (0x543f, 0x0000)
     FYES = (0x716e, 0x796d)
+    SUCC = (0x6d1c, 0x5858)
+    ERR =  (0x7950, 0x5000)
 
 @unique
 class EParams(IntEnum):
@@ -220,7 +222,7 @@ class HC(mqtt.Client):
             return self.y
 
     class ParamValueSM:
-        def __init__(self, sp_time = 10):
+        def __init__(self, sp_time = 10, sav_time = 30):
             self.state = ParamValSt.Value
             self.last_state = ParamValSt.Value
             self.param = EParams.temperature
@@ -260,6 +262,7 @@ class HC(mqtt.Client):
                             self.state = ParamValSt.Value
                         else:
                             self.state = ParamValSt.Save
+                            self.time = copy.copy(main_cycle)
                     if fc == KP.BAK:
                         self.param = EParams.temperature
                 case ParamValSt.Value:
@@ -276,7 +279,8 @@ class HC(mqtt.Client):
                     if c_uint16(main_cycle.value - self.time.value).value > self.sp_time:
                         self.state = ParamValSt.Value
                 case ParamValSt.Save:
-                    self.state = ParamValSt.Param
+                    if c_uint16(main_cycle.value - self.time.value).value > self.sp_time:
+                        self.state = ParamValSt.Param
 
             """ debug display """
             if self.last_state != self.state:
@@ -348,6 +352,7 @@ class HC(mqtt.Client):
             with open(file, "r") as configFile:
                 logging.info(f"Reading Config File")
                 self.config = HC.Config.from_json(configFile.read())
+                self.active_config_file = file
                 logging.debug(f"{self.config}")
             break
         else:
@@ -370,7 +375,7 @@ class HC(mqtt.Client):
     def on_connect(self, client, userdata, flags, rc, properties):
         """subscribes to the relevant channels"""
         if rc.is_failure:
-            logging.warning(f"Temporarily to connect: {rc}.")
+            logging.warning(f"Temporarily failed to connect: {rc}.")
         else: 
             logging.info(f"Connected: {str(rc)}")
             for src in self.config.mqtt.data_sources:
@@ -381,18 +386,24 @@ class HC(mqtt.Client):
             except:
                 pass
 
-    def on_disconnect(self, client, userdata, rc, properties):
+    def on_disconnect(self, client, userdata, flags, rc, properties):
         """ handles mqtt disconnects """
         self.connect_evt.clear()
         if rc.is_failure:
+            logging.warning("Unexpected disconnection. Starting disconnect timer.")
             self.dct = Thread(target=self.disconnect_thread)
             self.dct.start()
+        else:
+            logging.debug("Disconnected gracefully")
         # else graceful disconnection, do nothing
 
     def disconnect_thread(self):
         """ Sets the exit event if the timeout is not set in time """
+        logging.debug("Disconnect timer started.")
         if not self.connect_evt.wait(self.config.mqtt.timeout*3):
+            logging.critical("Disconnect timer triggering program exit.")
             self.exit_evt.set()
+        logging.debug("Disconnect timer ended.")
 
     def on_message(self, client, userdata, message):
         if message.topic in self.config.mqtt.data_sources:
@@ -560,6 +571,7 @@ class HC(mqtt.Client):
                 case 1:
                     """ save """
                     p_n = list(DS.SAVE.value)
+                    p_v = list(DS.SUCC.value) if self.save_success else list(DS.ERR.value)
 
         """ Display either the parameter name or the value """
         if val == False:
@@ -624,9 +636,11 @@ class HC(mqtt.Client):
         disp = []
         last_disp = []
         param = 0
+        last_value = True
         value = True
         buttonrepeatsm = ButtonRepeatSM()
         paramvaluesm = HC.ParamValueSM()
+        self.save_success = False
 
         """ start MQTT """
         self.connect(host=self.config.mqtt.broker, port=self.config.mqtt.port,
@@ -641,6 +655,7 @@ class HC(mqtt.Client):
             """ run button repeat SM """
             button = buttonrepeatsm.run(self.main_cycle, button)
             """ run param / value SM """
+            last_value = value
             param, value = paramvaluesm.run(self.main_cycle, button)
             """ insert the number editor here """
             self.numedit(param, value, button)
@@ -674,6 +689,18 @@ class HC(mqtt.Client):
                     self.start_cycle = True
                     """ do not allow the timer value to overflow """
                     self.start_cycle_timer.value = c_uint16(self.main_cycle.value - st_val - 1).value
+            """ process saving """
+            if param == EParams.save and last_value != True and value == True:
+                logging.debug("Attempting to save")
+                try:
+                    with open(self.active_config_file, "w") as configFile:
+                        configFile.write(self.config.to_json(indent=4))
+                        logging.info("Save successful")
+                        self.save_success = True
+                except Exception as err:
+                    tb = traceback.format_exc()
+                    logging.error(f"L {sys._getframe().f_back.f_lineno} Save attempt exception: {err}\nTraceback:\n{tb}")
+                    self.save_success = False
             """output display here"""
             last_disp = disp
             disp = self.param_scroll(False, param, value)
