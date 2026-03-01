@@ -2,10 +2,9 @@
 import minimalmodbus
 import time, json, signal, os, logging, traceback, sys, copy
 import paho.mqtt.client as mqtt
-from pathlib import Path
 from dataclasses import dataclass
 from dataclasses_json import dataclass_json
-from threading import Event, Thread
+from threading import Event
 from typing import *
 from ctypes import c_uint16
 from enum import Enum, IntEnum, unique
@@ -28,8 +27,6 @@ class DS(Enum):
     YES =  (0x6e79, 0x6d00)
     NO =   (0x543f, 0x0000)
     FYES = (0x716e, 0x796d)
-    SUCC = (0x6d1c, 0x5858)
-    ERR =  (0x7950, 0x5000)
 
 @unique
 class EParams(IntEnum):
@@ -38,9 +35,8 @@ class EParams(IntEnum):
     filter_ratio = 2
     hysteresis = 3
     start_time = 4
-    occ_cold_time = 5
-    occupancy = 6
-    save = 7
+    occupancy = 5
+    save = 6
 
 @unique
 class RepeatSt(IntEnum):
@@ -115,7 +111,7 @@ class ButtonRepeatSM:
         return keycode
 
 class OccSm:
-    def __init__(self, cold_dly = 30):
+    def __init__(self, cold_dly = 18000):
         self.state = OccSt.cold
         self.last_state = OccSt.cold
         self.time = c_uint16(0)
@@ -136,7 +132,7 @@ class OccSm:
                 if sum(data.values()) > 0:
                     self.state = OccSt.warm
                     self.time = copy.copy(cycle)
-                elif c_uint16(cycle.value - self.time.value).value >= self.cold_dly * 600:
+                elif c_uint16(cycle.value - self.time.value).value >= self.cold_dly:
                     self.state = OccSt.cold
 
         if self.state != self.last_state:
@@ -175,27 +171,7 @@ class Modbus:
     timeout: float
     baud: int
 
-@dataclass_json
-@dataclass
-class BUTTON:
-    initial_dly: int
-    repeat_dly: int
-
-@dataclass_json
-@dataclass
-class DISPLAY:
-    sp_time: int
-    sav_time: int
-
-@dataclass_json
-@dataclass
-class UI:
-    button: BUTTON
-    display: DISPLAY
-
 class HC(mqtt.Client):
-    long_name = "heater_control"
-    cfg_file_name = "hc_config"
     @dataclass_json
     @dataclass
     class Config:
@@ -210,15 +186,12 @@ class HC(mqtt.Client):
             - filter_ratio
             - hysteresis
             - start_time
-            - occ_cold_time
         """
-        ui: UI
         mqtt: MQTT
         modbus: Modbus
         loglevel: Optional[str] = None
 
-    exit_evt = Event()
-    connect_evt = Event()
+    exit = Event()
 
     CHAR_LUT = [
         0x3f, 0x06, 0x5b, 0x4f,
@@ -243,7 +216,7 @@ class HC(mqtt.Client):
             return self.y
 
     class ParamValueSM:
-        def __init__(self, sp_time = 10, sav_time = 30):
+        def __init__(self, sp_time = 10):
             self.state = ParamValSt.Value
             self.last_state = ParamValSt.Value
             self.param = EParams.temperature
@@ -251,7 +224,6 @@ class HC(mqtt.Client):
             self.last_kc = 0
             self.time = c_uint16(0)
             self.sp_time = sp_time
-            self.sav_time = sav_time
     
         def run(self, main_cycle, keycode):
             fc = 0
@@ -284,7 +256,6 @@ class HC(mqtt.Client):
                             self.state = ParamValSt.Value
                         else:
                             self.state = ParamValSt.Save
-                            self.time = copy.copy(main_cycle)
                     if fc == KP.BAK:
                         self.param = EParams.temperature
                 case ParamValSt.Value:
@@ -301,8 +272,7 @@ class HC(mqtt.Client):
                     if c_uint16(main_cycle.value - self.time.value).value > self.sp_time:
                         self.state = ParamValSt.Value
                 case ParamValSt.Save:
-                    if c_uint16(main_cycle.value - self.time.value).value > self.sav_time:
-                        self.state = ParamValSt.Param
+                    self.state = ParamValSt.Param
 
             """ debug display """
             if self.last_state != self.state:
@@ -355,32 +325,7 @@ class HC(mqtt.Client):
     def signal_handler(self, signum, _):
         """signal handling helper function"""
         logging.critical(f"Caught a deadly signal: {signal.Signals(signum).name}")
-        self.exit_evt.set()
-
-    def __init__(self):
-        files = []
-        my_path = os.path.dirname(os.path.abspath(__file__))
-        logging.debug(f"Program installed at {my_path}")
-        if my_path.startswith("/usr"):
-            new_path = f"/etc/{HC.long_name}"
-            files = [new_path, f"{Path.home()}{os.sep}.config{os.sep}{HC.long_name}"]
-        else:
-            paths = [f"{Path.home()}{os.sep}.config{os.sep}{HC.long_name}", my_path]
-        for path in paths:
-            file = f"{path}{os.sep}{HC.cfg_file_name}.json"
-            logging.debug(f"Attempting to read {file}")
-            if not Path(file).is_file():
-                continue
-            with open(file, "r") as configFile:
-                logging.info(f"Reading Config File")
-                self.config = HC.Config.from_json(configFile.read())
-                self.active_config_file = file
-                logging.debug(f"{self.config}")
-            break
-        else:
-            raise FileNotFoundError("Not able to locate configuration file.")
-        logging.info("Starting")
-        super().__init__(mqtt.CallbackAPIVersion.VERSION2, self.config.name)
+        self.exit.set()
 
     def on_log(self, client, userdata, level, buf):
         if level == mqtt.MQTT_LOG_DEBUG:
@@ -397,35 +342,11 @@ class HC(mqtt.Client):
     def on_connect(self, client, userdata, flags, rc, properties):
         """subscribes to the relevant channels"""
         if rc.is_failure:
-            logging.warning(f"Temporarily failed to connect: {rc}.")
+            logging.warning(f"Temporarily to connect: {rc}.")
         else: 
             logging.info(f"Connected: {str(rc)}")
             for src in self.config.mqtt.data_sources:
                 self.subscribe(src)
-            self.connect_evt.set()
-            try:
-                self.dct.join()
-            except:
-                pass
-
-    def on_disconnect(self, client, userdata, flags, rc, properties):
-        """ handles mqtt disconnects """
-        self.connect_evt.clear()
-        if rc.is_failure:
-            logging.warning("Unexpected disconnection. Starting disconnect timer.")
-            self.dct = Thread(target=self.disconnect_thread)
-            self.dct.start()
-        else:
-            logging.debug("Disconnected gracefully")
-        # else graceful disconnection, do nothing
-
-    def disconnect_thread(self):
-        """ Sets the exit event if the timeout is not set in time """
-        logging.debug("Disconnect timer started.")
-        if not self.connect_evt.wait(self.config.mqtt.timeout*3):
-            logging.critical("Disconnect timer triggering program exit.")
-            self.exit_evt.set()
-        logging.debug("Disconnect timer ended.")
 
     def on_message(self, client, userdata, message):
         if message.topic in self.config.mqtt.data_sources:
@@ -512,7 +433,6 @@ class HC(mqtt.Client):
         if c_val and (self.last_button != keycode) and (keycode & KP.ACT):
             """ hacky way to use the KP_ACT as an 'and' mask """
             button_code = keycode & (KP.ACT - 1)
-            """ numerical parameters """
             if c_param > EParams.temperature and c_param < EParams.occupancy:
                 param_name = EParams(c_param).name
                 item = self.config.temp[param_name]
@@ -521,17 +441,15 @@ class HC(mqtt.Client):
                     if (item.val > item.hi_lim):
                         item.val = item.hi_lim
                     logging.info(f"{param_name} inc to {item.val / (10.0 ** item.decimal)}")
+                    self.start_cycle = True
+                    self.process_temp(True)
                 elif button_code == KP.DWN:
                     item.val -= item.change_by
                     if (item.val < item.lo_lim):
                         item.val = item.lo_lim
                     logging.info(f"{param_name} dec to {item.val / (10.0 ** item.decimal)}")
-                """ temperature processing related params """
-                if c_param <= EParams.occ_cold_time:
                     self.start_cycle = True
                     self.process_temp(True)
-                else:
-                    self.occ_sm.cold_dly = self.config.temp["occ_cold_time"].val
             elif c_param == EParams.occupancy:
                 """ either button press directions inverts the forced occupancy """
                 if button_code == KP.UP or button_code == KP.DWN:
@@ -580,7 +498,6 @@ class HC(mqtt.Client):
             """ filter ratio """
             """ hysteresis """
             """ start time """
-            """ occupied cold delay """
             p_n = list(configItem.name7seg)
             p_v = [str(configItem.val), configItem.decimal]
         else:
@@ -597,7 +514,6 @@ class HC(mqtt.Client):
                 case 1:
                     """ save """
                     p_n = list(DS.SAVE.value)
-                    p_v = list(DS.SUCC.value) if self.save_success else list(DS.ERR.value)
 
         """ Display either the parameter name or the value """
         if val == False:
@@ -646,7 +562,7 @@ class HC(mqtt.Client):
         """ occupancy """
         self.focc = False
         self.occ = False
-        self.occ_sm = OccSm(self.config.temp["occ_cold_time"].val)
+        self.occ_sm = OccSm()
         self.motion = {}
 
         """ final heater control """
@@ -662,13 +578,9 @@ class HC(mqtt.Client):
         disp = []
         last_disp = []
         param = 0
-        last_value = True
         value = True
-        buttoncfg = self.config.ui.button
-        dispcfg = self.config.ui.display
-        buttonrepeatsm = ButtonRepeatSM(buttoncfg.initial_dly, buttoncfg.repeat_dly)
-        paramvaluesm = HC.ParamValueSM(dispcfg.sp_time, dispcfg.sav_time)
-        self.save_success = False
+        buttonrepeatsm = ButtonRepeatSM()
+        paramvaluesm = HC.ParamValueSM()
 
         """ start MQTT """
         self.connect(host=self.config.mqtt.broker, port=self.config.mqtt.port,
@@ -676,14 +588,13 @@ class HC(mqtt.Client):
         self.loop_start()
 
         start = time.monotonic()
-        while not self.exit_evt.wait(nextWait):
+        while not self.exit.wait(nextWait):
             self.main_cycle.value += 1
             """get button press here"""
             button = self.handle_modbus(self.instr.read_register, 0, functioncode = 4)
             """ run button repeat SM """
             button = buttonrepeatsm.run(self.main_cycle, button)
             """ run param / value SM """
-            last_value = value
             param, value = paramvaluesm.run(self.main_cycle, button)
             """ insert the number editor here """
             self.numedit(param, value, button)
@@ -717,18 +628,6 @@ class HC(mqtt.Client):
                     self.start_cycle = True
                     """ do not allow the timer value to overflow """
                     self.start_cycle_timer.value = c_uint16(self.main_cycle.value - st_val - 1).value
-            """ process saving """
-            if param == EParams.save and last_value != True and value == True:
-                logging.debug("Attempting to save")
-                try:
-                    with open(self.active_config_file, "w") as configFile:
-                        configFile.write(self.config.to_json(indent=4))
-                        logging.info("Save successful")
-                        self.save_success = True
-                except Exception as err:
-                    tb = traceback.format_exc()
-                    logging.error(f"L {sys._getframe().f_back.f_lineno} Save attempt exception: {err}\nTraceback:\n{tb}")
-                    self.save_success = False
             """output display here"""
             last_disp = disp
             disp = self.param_scroll(False, param, value)
@@ -760,7 +659,13 @@ class HC(mqtt.Client):
     where the source script exists.
 """
 if __name__ == "__main__":
+    heaterControl = HC(mqtt.CallbackAPIVersion.VERSION2, "heater_control")
+    my_path = os.path.dirname(os.path.abspath(__file__))
     logging.basicConfig(level=logging.DEBUG)
-    heaterControl = HC()
+    logging.info("Reading Config File")
+    with open(f"{my_path}{os.sep}hc_config.json", "r") as configFile:
+        heaterControl.config = HC.Config.from_json(configFile.read())
+        logging.debug(f"{heaterControl.config}")
+    logging.info("Starting")
     heaterControl.main()
 
