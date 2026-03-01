@@ -38,8 +38,9 @@ class EParams(IntEnum):
     filter_ratio = 2
     hysteresis = 3
     start_time = 4
-    occupancy = 5
-    save = 6
+    occ_cold_time = 5
+    occupancy = 6
+    save = 7
 
 @unique
 class RepeatSt(IntEnum):
@@ -114,7 +115,7 @@ class ButtonRepeatSM:
         return keycode
 
 class OccSm:
-    def __init__(self, cold_dly = 18000):
+    def __init__(self, cold_dly = 30):
         self.state = OccSt.cold
         self.last_state = OccSt.cold
         self.time = c_uint16(0)
@@ -135,7 +136,7 @@ class OccSm:
                 if sum(data.values()) > 0:
                     self.state = OccSt.warm
                     self.time = copy.copy(cycle)
-                elif c_uint16(cycle.value - self.time.value).value >= self.cold_dly:
+                elif c_uint16(cycle.value - self.time.value).value >= self.cold_dly * 600:
                     self.state = OccSt.cold
 
         if self.state != self.last_state:
@@ -174,6 +175,24 @@ class Modbus:
     timeout: float
     baud: int
 
+@dataclass_json
+@dataclass
+class BUTTON:
+    initial_dly: int
+    repeat_dly: int
+
+@dataclass_json
+@dataclass
+class DISPLAY:
+    sp_time: int
+    sav_time: int
+
+@dataclass_json
+@dataclass
+class UI:
+    button: BUTTON
+    display: DISPLAY
+
 class HC(mqtt.Client):
     long_name = "heater_control"
     cfg_file_name = "hc_config"
@@ -191,7 +210,9 @@ class HC(mqtt.Client):
             - filter_ratio
             - hysteresis
             - start_time
+            - occ_cold_time
         """
+        ui: UI
         mqtt: MQTT
         modbus: Modbus
         loglevel: Optional[str] = None
@@ -230,6 +251,7 @@ class HC(mqtt.Client):
             self.last_kc = 0
             self.time = c_uint16(0)
             self.sp_time = sp_time
+            self.sav_time = sav_time
     
         def run(self, main_cycle, keycode):
             fc = 0
@@ -279,7 +301,7 @@ class HC(mqtt.Client):
                     if c_uint16(main_cycle.value - self.time.value).value > self.sp_time:
                         self.state = ParamValSt.Value
                 case ParamValSt.Save:
-                    if c_uint16(main_cycle.value - self.time.value).value > self.sp_time:
+                    if c_uint16(main_cycle.value - self.time.value).value > self.sav_time:
                         self.state = ParamValSt.Param
 
             """ debug display """
@@ -490,6 +512,7 @@ class HC(mqtt.Client):
         if c_val and (self.last_button != keycode) and (keycode & KP.ACT):
             """ hacky way to use the KP_ACT as an 'and' mask """
             button_code = keycode & (KP.ACT - 1)
+            """ numerical parameters """
             if c_param > EParams.temperature and c_param < EParams.occupancy:
                 param_name = EParams(c_param).name
                 item = self.config.temp[param_name]
@@ -498,15 +521,17 @@ class HC(mqtt.Client):
                     if (item.val > item.hi_lim):
                         item.val = item.hi_lim
                     logging.info(f"{param_name} inc to {item.val / (10.0 ** item.decimal)}")
-                    self.start_cycle = True
-                    self.process_temp(True)
                 elif button_code == KP.DWN:
                     item.val -= item.change_by
                     if (item.val < item.lo_lim):
                         item.val = item.lo_lim
                     logging.info(f"{param_name} dec to {item.val / (10.0 ** item.decimal)}")
+                """ temperature processing related params """
+                if c_param <= EParams.occ_cold_time:
                     self.start_cycle = True
                     self.process_temp(True)
+                else:
+                    self.occ_sm.cold_dly = self.config.temp["occ_cold_time"].val
             elif c_param == EParams.occupancy:
                 """ either button press directions inverts the forced occupancy """
                 if button_code == KP.UP or button_code == KP.DWN:
@@ -555,6 +580,7 @@ class HC(mqtt.Client):
             """ filter ratio """
             """ hysteresis """
             """ start time """
+            """ occupied cold delay """
             p_n = list(configItem.name7seg)
             p_v = [str(configItem.val), configItem.decimal]
         else:
@@ -620,7 +646,7 @@ class HC(mqtt.Client):
         """ occupancy """
         self.focc = False
         self.occ = False
-        self.occ_sm = OccSm()
+        self.occ_sm = OccSm(self.config.temp["occ_cold_time"].val)
         self.motion = {}
 
         """ final heater control """
@@ -638,8 +664,10 @@ class HC(mqtt.Client):
         param = 0
         last_value = True
         value = True
-        buttonrepeatsm = ButtonRepeatSM()
-        paramvaluesm = HC.ParamValueSM()
+        buttoncfg = self.config.ui.button
+        dispcfg = self.config.ui.display
+        buttonrepeatsm = ButtonRepeatSM(buttoncfg.initial_dly, buttoncfg.repeat_dly)
+        paramvaluesm = HC.ParamValueSM(dispcfg.sp_time, dispcfg.sav_time)
         self.save_success = False
 
         """ start MQTT """
