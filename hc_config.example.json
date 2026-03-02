@@ -32,27 +32,10 @@
 			"decimal": 0,
 			"hi_lim": 109,
 			"lo_lim": 30
-		},
-		"occ_cold_time": {
-			"name7seg": [22622, 1646],
-			"val": 30,
-			"decimal": 0,
-			"hi_lim": 109,
-			"lo_lim": 10
-		}
-	},
-	"ui": {
-		"button": {
-			"initial_dly": 9,
-			"repeat_dly": 2
-		},
-		"display": {
-			"sp_time": 10,
-			"sav_time": 30
 		}
 	},
 	"mqtt": {
-		"data_sources": ["daisy/checkup", "daisy/event", "haldor/checkup", "haldor/event", "reporter/checkup_req"],
+		"data_sources": ["daisy/checkup"],
 		"temp_source": "ShopB Temp",
 		"broker": "hal.maglab",
 		"port": 1883,
