@@ -9,6 +9,7 @@ from threading import Event, Thread
 from typing import *
 from ctypes import c_uint16
 from enum import Enum, IntEnum, unique
+from functools import reduce
 
 @unique
 class KP(IntEnum):
@@ -376,10 +377,23 @@ class HC(mqtt.Client):
                 self.config = HC.Config.from_json(configFile.read())
                 self.active_config_file = file
                 logging.debug(f"{self.config}")
-            break
+                break
         else:
             raise FileNotFoundError("Not able to locate configuration file.")
-        logging.info("Starting")
+        """ check if temp has the right items """
+        assert reduce(lambda a, b : a and (b in self.config.temp),
+                      ["set_point", "filter_ratio", "hysteresis", "start_time", "occ_cold_time"], 
+                      True)
+        """ log levels """
+        try:
+            if type(logging.getLevelName(self.config.loglevel.upper())) is int:
+                logging.basicConfig(level=self.config.loglevel.upper())
+            else:
+                logging.warning("Log level not configured.  Defaulting to WARNING.")
+        except (KeyError, AttributeError) as e:
+            logging.warning("Log level not configured.  Defaulting to WARNING.  Caught: " + str(e))
+
+        logging.info("Starting MQTT")
         super().__init__(mqtt.CallbackAPIVersion.VERSION2, self.config.name)
 
     def on_log(self, client, userdata, level, buf):
@@ -616,15 +630,6 @@ class HC(mqtt.Client):
         start = time.monotonic()
         last_cycle_overrun = 0
         self.main_cycle = c_uint16(0)
-
-        """ log levels """
-        try:
-            if type(logging.getLevelName(self.config.loglevel.upper())) is int:
-                logging.basicConfig(level=self.config.loglevel.upper())
-            else:
-                logging.warning("Log level not configured.  Defaulting to WARNING.")
-        except (KeyError, AttributeError) as e:
-            logging.warning("Log level not configured.  Defaulting to WARNING.  Caught: " + str(e))
 
         """ set signal handlers """
         signal.signal(signal.SIGINT, self.signal_handler)
