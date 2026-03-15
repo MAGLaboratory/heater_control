@@ -469,6 +469,7 @@ class HC(mqtt.Client):
             elif (message.topic.endswith("checkup_req")):
                 """ process motion monitoring """
                 """ yes, there is a state machine in here """
+                logging.debug("Received checkup req.")
                 self.occ = self.occ_sm.run(self.main_cycle, self.motion)
                 self.motion = {}
 
@@ -487,7 +488,6 @@ class HC(mqtt.Client):
                 self.instr.serial.reset_input_buffer()
                 if tries <= 0:
                     raise
-
         return retval
 
 
